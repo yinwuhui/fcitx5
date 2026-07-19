@@ -237,6 +237,7 @@ public:
     ThemeImage(const IconTheme &iconTheme, const std::string &icon,
                const std::string &label, uint32_t size,
                const ClassicUI *classicui);
+    ThemeImage(const std::filesystem::path &path, uint32_t size);
 
     static void drawTextIcon(cairo_surface_t *surface, const std::string &label,
                              uint32_t size, const ClassicUIConfig &config);
@@ -297,6 +298,8 @@ public:
     const ThemeImage &loadImage(const std::string &icon,
                                 const std::string &label, uint32_t size,
                                 const ClassicUI *classicui);
+    const ThemeImage &loadBubbleFishIcon(const std::string &icon,
+                                         uint32_t size);
     const ThemeImage &loadBackground(const BackgroundImageConfig &cfg);
     const ThemeImage &loadAction(const ActionImageConfig &cfg);
 

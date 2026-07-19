@@ -8,6 +8,7 @@
 #define _FCITX_UI_CLASSIC_INPUTWINDOW_H_
 
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <initializer_list>
 #include <string>
@@ -154,6 +155,18 @@ protected:
     bool hasNext_ = false;
     Rect prevRegion_;
     Rect nextRegion_;
+    Rect emojiRegion_;
+    Rect voiceRegion_;
+    Rect clipboardRegion_;
+    Rect translateRegion_;
+    Rect fullShapeRegion_;
+    std::vector<Rect> emojiCategoryRegions_;
+    std::vector<Rect> emojiItemRegions_;
+    std::vector<std::string> visibleEmojis_;
+    bool showToolBar_ = false;
+    bool showEmojiPanel_ = false;
+    int emojiCategory_ = 0;
+    std::deque<std::string> recentEmojis_;
     bool prevHovered_ = false;
     bool nextHovered_ = false;
     int candidateIndex_ = -1;
@@ -172,6 +185,11 @@ private:
     YGNodePtr auxDownNode_;
     YGNodePtr auxDownTextNode_;
     YGNodePtr candidatesNode_;
+    YGNodePtr toolBarNode_;
+    YGNodePtr emojiPanelNode_;
+
+    void loadRecentEmojis();
+    void rememberEmoji(const std::string &emoji);
 
     struct CandidateNode {
         YGNodePtr self{YGNodeNew()};

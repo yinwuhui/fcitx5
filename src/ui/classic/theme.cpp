@@ -291,6 +291,17 @@ ThemeImage::ThemeImage(const IconTheme &iconTheme, const std::string &icon,
     }
 }
 
+ThemeImage::ThemeImage(const std::filesystem::path &path, uint32_t size)
+    : size_(size) {
+    auto fd = StandardPaths::openPath(path);
+    image_.reset(loadImage(fd, path));
+    if (image_ && cairo_surface_status(image_.get()) != CAIRO_STATUS_SUCCESS) {
+        image_.reset();
+    }
+    valid_ = image_ != nullptr;
+    isImage_ = valid_;
+}
+
 ThemeImage::ThemeImage(const Theme &theme, const BackgroundImageConfig &cfg,
                        const Color &color, const Color &borderColor) {
     if (!cfg.image->empty()) {
@@ -495,6 +506,26 @@ const ThemeImage &Theme::loadImage(const std::string &icon,
     auto result = map.emplace(
         std::piecewise_construct, std::forward_as_tuple(name),
         std::forward_as_tuple(iconTheme_, icon, label, size, classicui));
+    assert(result.second);
+    return result.first->second;
+}
+
+const ThemeImage &Theme::loadBubbleFishIcon(const std::string &icon,
+                                            uint32_t size) {
+    auto &map = trayImageTable_;
+    auto name = stringutils::concat("bubblefish-resource:", icon);
+    if (auto *image = findValue(map, name)) {
+        if (image->size() == size) {
+            return *image;
+        }
+        map.erase(name);
+    }
+
+    const auto path = std::filesystem::path(FCITX_INSTALL_PKGDATADIR) /
+                      "bubblefish" / "icons" / (icon + ".svg");
+    auto result = map.emplace(std::piecewise_construct,
+                              std::forward_as_tuple(name),
+                              std::forward_as_tuple(path, size));
     assert(result.second);
     return result.first->second;
 }

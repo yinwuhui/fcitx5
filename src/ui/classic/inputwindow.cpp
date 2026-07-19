@@ -6,13 +6,17 @@
  */
 #include "inputwindow.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <cairo.h>
@@ -32,7 +36,9 @@
 #include "fcitx-utils/color.h"
 #include "fcitx-utils/log.h"
 #include "fcitx-utils/rect.h"
+#include "fcitx-utils/standardpaths.h"
 #include "fcitx-utils/textformatflags.h"
+#include "fcitx/action.h"
 #include "fcitx/candidatelist.h"
 #include "fcitx/inputmethodentry.h"
 #include "fcitx/inputpanel.h"
@@ -40,6 +46,7 @@
 #include "fcitx/misc_p.h"
 #include "fcitx/text.h"
 #include "fcitx/userinterface.h"
+#include "fcitx/userinterfacemanager.h"
 #include "classicui.h"
 #include "common.h"
 #include "theme.h"
@@ -47,6 +54,67 @@
 namespace fcitx::classicui {
 
 namespace {
+
+constexpr std::array<std::string_view, 5> EmojiCategoryLabels = {
+    "最近", "笑脸", "人物", "动物", "食物"};
+
+const std::array<std::vector<std::string>, 4> EmojiCategories = {{
+    {"😀", "😃", "😄", "😁", "😂", "🥰", "😍", "😊", "😉", "😎",
+     "🤔", "😭", "😡", "🥳", "🤩"},
+    {"👋", "👍", "👏", "🙏", "💪", "🤝", "👌", "✌️", "🤞", "🫶",
+     "👨", "👩", "👶", "🧑‍💻", "🧑‍🎨"},
+    {"🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯",
+     "🦁", "🐮", "🐷", "🐸", "🐵"},
+    {"🍎", "🍊", "🍋", "🍉", "🍇", "🍓", "🍒", "🍑", "🥭", "🍍",
+     "🍔", "🍕", "🍜", "🍰", "☕"},
+}};
+
+void roundedRectangle(cairo_t *cr, double x, double y, double width,
+                      double height, double radius) {
+    constexpr double Kappa = 0.5522847498307936;
+    radius = std::min({radius, width / 2.0, height / 2.0});
+    cairo_new_sub_path(cr);
+    cairo_move_to(cr, x + radius, y);
+    cairo_line_to(cr, x + width - radius, y);
+    cairo_curve_to(cr, x + width - radius + radius * Kappa, y,
+                   x + width, y + radius - radius * Kappa, x + width,
+                   y + radius);
+    cairo_line_to(cr, x + width, y + height - radius);
+    cairo_curve_to(cr, x + width, y + height - radius + radius * Kappa,
+                   x + width - radius + radius * Kappa, y + height,
+                   x + width - radius, y + height);
+    cairo_line_to(cr, x + radius, y + height);
+    cairo_curve_to(cr, x + radius - radius * Kappa, y + height, x,
+                   y + height - radius + radius * Kappa, x,
+                   y + height - radius);
+    cairo_line_to(cr, x, y + radius);
+    cairo_curve_to(cr, x, y + radius - radius * Kappa,
+                   x + radius - radius * Kappa, y, x + radius, y);
+    cairo_close_path(cr);
+}
+
+void drawBubbleFishIcon(cairo_t *cr, Theme &theme, const Rect &region,
+                        const std::string &name) {
+    const uint32_t size =
+        std::max(16, std::min(region.width(), region.height()) - 8);
+    const auto &image = theme.loadBubbleFishIcon(name, size);
+    if (!image.valid()) {
+        return;
+    }
+    const double imageScale =
+        std::min(static_cast<double>(region.width() - 8) / image.width(),
+                 static_cast<double>(region.height() - 8) / image.height());
+    const double x = region.left() +
+                     (region.width() - image.width() * imageScale) / 2.0;
+    const double y = region.top() +
+                     (region.height() - image.height() * imageScale) / 2.0;
+    cairo_save(cr);
+    cairo_translate(cr, x, y);
+    cairo_scale(cr, imageScale, imageScale);
+    cairo_set_source_surface(cr, image, 0, 0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+}
 
 auto newPangoLayout(PangoContext *context) {
     GObjectUniquePtr<PangoLayout> ptr(pango_layout_new(context));
@@ -163,6 +231,10 @@ InputWindow::InputWindow(ClassicUI *parent) : parent_(parent) {
 
     YGNodeInsertChild(mainNode_.get(), upperNode_.get(), 0);
     YGNodeInsertChild(mainNode_.get(), lowerNode_.get(), 1);
+    toolBarNode_.reset(YGNodeNew());
+    YGNodeInsertChild(mainNode_.get(), toolBarNode_.get(), 2);
+    emojiPanelNode_.reset(YGNodeNew());
+    YGNodeInsertChild(mainNode_.get(), emojiPanelNode_.get(), 3);
     YGNodeStyleSetFlexDirection(mainNode_.get(), YGFlexDirectionColumn);
 
     YGNodeInsertChild(upperNode_.get(), upperTextNode_.get(), 0);
@@ -171,11 +243,48 @@ InputWindow::InputWindow(ClassicUI *parent) : parent_(parent) {
     YGNodeInsertChild(auxDownNode_.get(), auxDownTextNode_.get(), 0);
 
     YGNodeInsertChild(lowerNode_.get(), candidatesNode_.get(), 1);
+    loadRecentEmojis();
+}
+
+void InputWindow::loadRecentEmojis() {
+    const auto path = StandardPaths::global().userDirectory(
+                          StandardPathsType::Config) /
+                      "bubblefish" / "emoji-recent";
+    std::ifstream stream(path);
+    std::string emoji;
+    while (recentEmojis_.size() < 20 && std::getline(stream, emoji)) {
+        if (!emoji.empty() &&
+            std::find(recentEmojis_.begin(), recentEmojis_.end(), emoji) ==
+                recentEmojis_.end()) {
+            recentEmojis_.push_back(emoji);
+        }
+    }
+}
+
+void InputWindow::rememberEmoji(const std::string &emoji) {
+    std::erase(recentEmojis_, emoji);
+    recentEmojis_.push_front(emoji);
+    while (recentEmojis_.size() > 20) {
+        recentEmojis_.pop_back();
+    }
+
+    const auto directory = StandardPaths::global().userDirectory(
+                               StandardPathsType::Config) /
+                           "bubblefish";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    std::ofstream stream(directory / "emoji-recent", std::ios::trunc);
+    for (const auto &recent : recentEmojis_) {
+        stream << recent << '\n';
+    }
 }
 
 void InputWindow::insertAttr(PangoAttrList *attrList, TextFormatFlags format,
                              int start, int end, bool highlight,
                              TextType type) const {
+    const bool selectedCandidate =
+        type == TextType::Regular &&
+        (highlight || format.test(TextFormatFlag::HighLight));
     if (format & TextFormatFlag::Underline) {
         auto *attr = pango_attr_underline_new(PANGO_UNDERLINE_SINGLE);
         attr->start_index = start;
@@ -200,8 +309,19 @@ void InputWindow::insertAttr(PangoAttrList *attrList, TextFormatFlags format,
         attr->end_index = end;
         pango_attr_list_insert(attrList, attr);
     }
+    if (selectedCandidate) {
+        // Make the selected candidate two typographic steps larger without
+        // changing the configured base font size.
+        auto *attr = pango_attr_scale_new(1.2);
+        attr->start_index = start;
+        attr->end_index = end;
+        pango_attr_list_insert(attrList, attr);
+    }
     Color color;
-    if (format & TextFormatFlag::HighLight) {
+    if (selectedCandidate) {
+        // Midpoint of BubbleFish logo's primary blue gradient.
+        color = Color("#087CF2");
+    } else if (format & TextFormatFlag::HighLight) {
         color = parent_->theme().inputPanelHighlightText();
     } else {
         Color table[2][3] = {
@@ -228,23 +348,6 @@ void InputWindow::insertAttr(PangoAttrList *attrList, TextFormatFlags format,
         pango_attr_list_insert(attrList, alphaAttr);
     }
 
-    auto background = parent_->theme().inputPanelHighlight();
-    if (format.test(TextFormatFlag::HighLight) && background.alpha() > 0) {
-        attr = pango_attr_background_new(background.redF() * scale,
-                                         background.greenF() * scale,
-                                         background.blueF() * scale);
-        attr->start_index = start;
-        attr->end_index = end;
-        pango_attr_list_insert(attrList, attr);
-
-        if (background.alpha() != 255) {
-            auto *alphaAttr =
-                pango_attr_background_alpha_new(background.alphaF() * scale);
-            alphaAttr->start_index = start;
-            alphaAttr->end_index = end;
-            pango_attr_list_insert(attrList, alphaAttr);
-        }
-    }
 }
 
 void InputWindow::appendText(std::string &s, PangoAttrList *attrList,
@@ -283,6 +386,19 @@ void InputWindow::setTextToMultilineLayout(InputContext *inputContext,
 
     for (const auto &line : lines) {
         layout.lines_.emplace_back(pango_layout_new(context_.get()));
+        if (type == TextType::Regular &&
+            line.toString().find('\t') != std::string::npos) {
+            // Keep expanded columns aligned without the excessive fixed gap.
+            // Roughly four character cells fits a numbered Chinese candidate,
+            // plus one extra character of breathing room.
+            auto *tabs = pango_tab_array_new(10, true);
+            for (int column = 0; column < 10; ++column) {
+                pango_tab_array_set_tab(tabs, column, PANGO_TAB_LEFT,
+                                        (column + 1) * 72);
+            }
+            pango_layout_set_tabs(layout.lines_.back().get(), tabs);
+            pango_tab_array_free(tabs);
+        }
         layout.attrLists_.emplace_back();
         layout.highlightAttrLists_.emplace_back();
         setTextToLayout(inputContext, layout.lines_.back().get(),
@@ -509,8 +625,18 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
     cairo_scale(cr, scale, scale);
     auto &theme = parent_->theme();
     cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-    theme.paint(cr, *theme.inputPanel->background, width, height, /*alpha=*/1.0,
-                scale);
+    cairo_set_source_rgba(cr, 0, 0, 0, 0);
+    cairo_paint(cr);
+    constexpr double CornerRadius = 12.0;
+    const double borderWidth = *theme.inputPanel->background->borderWidth;
+    cairoSetSourceColor(cr, Color("#087CF2"));
+    roundedRectangle(cr, 0, 0, width, height, CornerRadius);
+    cairo_fill(cr);
+    cairoSetSourceColor(cr, theme.inputPanelBackground());
+    roundedRectangle(cr, borderWidth, borderWidth,
+                     width - 2 * borderWidth, height - 2 * borderWidth,
+                     std::max(0.0, CornerRadius - borderWidth));
+    cairo_fill(cr);
     const auto &margin = *theme.inputPanel->contentMargin;
     const auto &textMargin = *theme.inputPanel->textMargin;
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
@@ -546,6 +672,22 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
             cairo_stroke(cr);
             cairo_restore(cr);
         }
+        int upperHeight = 0;
+        pango_layout_get_pixel_size(upperLayout_.get(), nullptr, &upperHeight);
+        const int actionHeight = std::max(28, upperHeight + 6);
+        const int actionRight =
+            width - std::max(0.0, borderWidth) - *margin.marginRight -
+            *textMargin.marginRight;
+        voiceRegion_.setPosition(actionRight - 28, upperTop - 3);
+        voiceRegion_.setSize(28, actionHeight);
+        emojiRegion_.setPosition(voiceRegion_.left() - 32,
+                                 voiceRegion_.top());
+        emojiRegion_.setSize(28, actionHeight);
+        drawBubbleFishIcon(cr, theme, emojiRegion_, "bubblefish-emoji");
+        drawBubbleFishIcon(cr, theme, voiceRegion_, "bubblefish-voice");
+    } else {
+        emojiRegion_ = Rect();
+        voiceRegion_ = Rect();
     }
 
     // Use yoga-based positioning for lower layout
@@ -601,16 +743,6 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
         const int highlightIndex = highlight();
         bool highlight = false;
         if (highlightIndex >= 0 && i == static_cast<size_t>(highlightIndex)) {
-            cairo_save(cr);
-            cairo_translate(cr, candidateLeft - *highlightMargin.marginLeft,
-                            candidateTop - *highlightMargin.marginTop);
-            theme.paint(cr, *theme.inputPanel->highlight,
-                        highlightWidth + *highlightMargin.marginLeft +
-                            *highlightMargin.marginRight,
-                        candidateHeight + *highlightMargin.marginTop +
-                            *highlightMargin.marginBottom,
-                        /*alpha=*/1.0, scale);
-            cairo_restore(cr);
             highlight = true;
         }
 
@@ -644,82 +776,102 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
 
     prevRegion_ = Rect();
     nextRegion_ = Rect();
-    if (nCandidates_ && (hasPrev_ || hasNext_)) {
-        const auto &prev = theme.loadAction(*theme.inputPanel->prev);
-        const auto &next = theme.loadAction(*theme.inputPanel->next);
-        if (prev.valid() && next.valid()) {
-            cairo_save(cr);
-            int prevY = 0;
-            int nextY = 0;
-            switch (*theme.inputPanel->buttonAlignment) {
-            case PageButtonAlignment::Top:
-                prevY = nextY = absolute<YGNodeLayoutGetTop>(buttonNode_);
-                break;
-            case PageButtonAlignment::FirstCandidate:
-                prevY = candidateRegions_.front().top() +
-                        ((candidateRegions_.front().height() - prev.height()) /
-                         2.0);
-                nextY = candidateRegions_.front().top() +
-                        ((candidateRegions_.front().height() - next.height()) /
-                         2.0);
-                break;
-            case PageButtonAlignment::Center:
-                prevY = absolute<YGNodeLayoutGetTop>(buttonNode_) +
-                        ((YGNodeLayoutGetHeight(buttonNode_.get()) -
-                          prev.height()) /
-                         2.0);
-                nextY = absolute<YGNodeLayoutGetTop>(buttonNode_) +
-                        ((YGNodeLayoutGetHeight(buttonNode_.get()) -
-                          next.height()) /
-                         2.0);
-                break;
-            case PageButtonAlignment::LastCandidate:
-                prevY =
-                    candidateRegions_.back().top() +
-                    ((candidateRegions_.back().height() - prev.height()) / 2.0);
-                nextY =
-                    candidateRegions_.back().top() +
-                    ((candidateRegions_.back().height() - next.height()) / 2.0);
-                break;
-            case PageButtonAlignment::Bottom:
-            default:
-                prevY = absolute<YGNodeLayoutGetTop>(buttonNode_) +
-                        YGNodeLayoutGetHeight(buttonNode_.get()) -
-                        prev.height();
-                nextY = absolute<YGNodeLayoutGetTop>(buttonNode_) +
-                        YGNodeLayoutGetHeight(buttonNode_.get()) -
-                        next.height();
-                break;
-            }
-            nextRegion_.setPosition(absolute<YGNodeLayoutGetLeft>(buttonNode_) +
-                                        prev.width(),
-                                    nextY);
-            nextRegion_.setSize(next.width(), next.height());
-            cairo_translate(cr, nextRegion_.left(), nextRegion_.top());
+    if (nCandidates_ && !candidateRegions_.empty()) {
+        const int buttonY = candidateRegions_.front().top();
+        const int buttonH = std::max(28, candidateRegions_.front().height());
+        const int buttonX = absolute<YGNodeLayoutGetLeft>(buttonNode_);
+        nextRegion_.setPosition(buttonX, buttonY);
+        nextRegion_.setSize(30, buttonH);
+        prevRegion_.setPosition(buttonX + 32, buttonY);
+        prevRegion_.setSize(30, buttonH);
+        drawBubbleFishIcon(cr, theme, nextRegion_, "bubblefish-dropdown");
+        drawBubbleFishIcon(cr, theme, prevRegion_, "bubblefish-tools");
+    }
 
-            shrink(nextRegion_, *theme.inputPanel->next->clickMargin);
-            double alpha = 1.0;
-            if (!hasNext_) {
-                alpha = 0.3;
-            } else if (nextHovered_) {
-                alpha = 0.7;
+    clipboardRegion_ = Rect();
+    translateRegion_ = Rect();
+    fullShapeRegion_ = Rect();
+    if (showToolBar_) {
+        const int toolX = absolute<YGNodeLayoutGetLeft>(toolBarNode_) + 6;
+        const int toolY = absolute<YGNodeLayoutGetTop>(toolBarNode_) + 3;
+        clipboardRegion_.setPosition(toolX, toolY);
+        clipboardRegion_.setSize(36, 34);
+        translateRegion_.setPosition(toolX + 44, toolY);
+        translateRegion_.setSize(36, 34);
+        fullShapeRegion_.setPosition(toolX + 88, toolY);
+        fullShapeRegion_.setSize(36, 34);
+        drawBubbleFishIcon(cr, theme, clipboardRegion_,
+                           "bubblefish-clipboard");
+        drawBubbleFishIcon(cr, theme, translateRegion_,
+                           "bubblefish-translate");
+        auto *fullShapeAction = parent_->instance()
+                                    ->userInterfaceManager()
+                                    .lookupAction("bubblefish-full-shape");
+        const bool fullShape =
+            fullShapeAction && fullShapeAction->isChecked(inputContext_.get());
+        drawBubbleFishIcon(cr, theme, fullShapeRegion_,
+                           fullShape ? "bubblefish-full-to-half"
+                                     : "bubblefish-half-to-full");
+    }
+
+    emojiCategoryRegions_.clear();
+    emojiItemRegions_.clear();
+    visibleEmojis_.clear();
+    if (showEmojiPanel_) {
+        const int panelX = absolute<YGNodeLayoutGetLeft>(emojiPanelNode_) + 6;
+        const int panelY = absolute<YGNodeLayoutGetTop>(emojiPanelNode_) + 4;
+        auto textLayout = newPangoLayout(context_.get());
+
+        for (size_t i = 0; i < EmojiCategoryLabels.size(); ++i) {
+            Rect region;
+            region.setPosition(panelX + static_cast<int>(i) * 58, panelY);
+            region.setSize(54, 26);
+            emojiCategoryRegions_.push_back(region);
+            pango_layout_set_text(textLayout.get(),
+                                  EmojiCategoryLabels[i].data(), -1);
+            cairoSetSourceColor(cr, static_cast<int>(i) == emojiCategory_
+                                        ? Color("#087CF2")
+                                        : theme.inputPanelText());
+            renderLayout(cr, textLayout.get(), region.left() + 8,
+                         region.top() + 3);
+            if (static_cast<int>(i) == emojiCategory_) {
+                cairo_set_line_width(cr, 2);
+                cairo_move_to(cr, region.left() + 7, region.bottom() - 1);
+                cairo_line_to(cr, region.right() - 7, region.bottom() - 1);
+                cairo_stroke(cr);
             }
-            theme.paint(cr, *theme.inputPanel->next, alpha);
-            cairo_restore(cr);
-            cairo_save(cr);
-            prevRegion_.setPosition(absolute<YGNodeLayoutGetLeft>(buttonNode_),
-                                    prevY);
-            prevRegion_.setSize(prev.width(), prev.height());
-            cairo_translate(cr, prevRegion_.left(), prevRegion_.top());
-            shrink(prevRegion_, *theme.inputPanel->prev->clickMargin);
-            alpha = 1.0;
-            if (!hasPrev_) {
-                alpha = 0.3;
-            } else if (prevHovered_) {
-                alpha = 0.7;
-            }
-            theme.paint(cr, *theme.inputPanel->prev, alpha);
-            cairo_restore(cr);
+        }
+
+        if (emojiCategory_ == 0) {
+            visibleEmojis_.assign(recentEmojis_.begin(), recentEmojis_.end());
+        } else {
+            visibleEmojis_ = EmojiCategories[emojiCategory_ - 1];
+        }
+        if (visibleEmojis_.size() > 10) {
+            visibleEmojis_.resize(10);
+        }
+
+        auto *emojiFont = pango_font_description_copy(
+            pango_context_get_font_description(context_.get()));
+        pango_font_description_set_absolute_size(emojiFont, 18 * PANGO_SCALE);
+        pango_layout_set_font_description(textLayout.get(), emojiFont);
+        pango_font_description_free(emojiFont);
+        cairoSetSourceColor(cr, theme.inputPanelText());
+        for (size_t i = 0; i < visibleEmojis_.size(); ++i) {
+            Rect region;
+            region.setPosition(panelX + static_cast<int>(i) * 34, panelY + 32);
+            region.setSize(32, 34);
+            emojiItemRegions_.push_back(region);
+            pango_layout_set_text(textLayout.get(), visibleEmojis_[i].c_str(),
+                                  -1);
+            renderLayout(cr, textLayout.get(), region.left() + 5,
+                         region.top() + 4);
+        }
+        if (visibleEmojis_.empty()) {
+            pango_layout_set_font_description(textLayout.get(), nullptr);
+            pango_layout_set_text(textLayout.get(), "暂无最近使用", -1);
+            cairoSetSourceColor(cr, theme.inputPanelText());
+            renderLayout(cr, textLayout.get(), panelX + 8, panelY + 39);
         }
     }
 
@@ -733,13 +885,45 @@ void InputWindow::click(int x, int y) {
     if (!inputContext) {
         return;
     }
+    if (emojiRegion_.contains(x, y)) {
+        showEmojiPanel_ = !showEmojiPanel_;
+        inputContext->updateUserInterface(UserInterfaceComponent::InputPanel);
+        return;
+    }
+    for (size_t i = 0; i < emojiCategoryRegions_.size(); ++i) {
+        if (emojiCategoryRegions_[i].contains(x, y)) {
+            emojiCategory_ = static_cast<int>(i);
+            inputContext->updateUserInterface(
+                UserInterfaceComponent::InputPanel);
+            return;
+        }
+    }
+    for (size_t i = 0; i < emojiItemRegions_.size(); ++i) {
+        if (emojiItemRegions_[i].contains(x, y) &&
+            i < visibleEmojis_.size()) {
+            const auto emoji = visibleEmojis_[i];
+            rememberEmoji(emoji);
+            showEmojiPanel_ = false;
+            inputContext->reset();
+            inputContext->commitString(emoji);
+            return;
+        }
+    }
     const auto candidateList = inputContext->inputPanel().candidateList();
     if (!candidateList) {
         return;
     }
+    if (fullShapeRegion_.contains(x, y)) {
+        if (auto *action = parent_->instance()
+                               ->userInterfaceManager()
+                               .lookupAction("bubblefish-full-shape")) {
+            action->activate(inputContext);
+        }
+        return;
+    }
     if (auto *pageable = candidateList->toPageable()) {
-        if (pageable->hasPrev() && prevRegion_.contains(x, y)) {
-            pageable->prev();
+        if (prevRegion_.contains(x, y)) {
+            showToolBar_ = !showToolBar_;
             inputContext->updateUserInterface(
                 UserInterfaceComponent::InputPanel);
             return;
@@ -896,6 +1080,8 @@ void InputWindow::updateYogaLayout() {
         pango_layout_get_pixel_size(upperLayout_.get(), &w, &h);
         YGNodeStyleSetWidth(upperTextNode_.get(), w);
         YGNodeStyleSetHeight(upperTextNode_.get(), fontHeight);
+        // Reserve space for emoji and voice actions after the composition.
+        YGNodeStyleSetWidth(upperNode_.get(), w + 72);
     }
 
     // Configure and add lower node if it has content
@@ -989,7 +1175,7 @@ void InputWindow::updateYogaLayout() {
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeLeft,
                                  *textMargin.marginLeft);
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeRight,
-                                 *textMargin.marginRight);
+                                 *textMargin.marginRight + fontHeight);
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeTop,
                                  *textMargin.marginTop);
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeBottom,
@@ -1004,15 +1190,25 @@ void InputWindow::updateYogaLayout() {
         }
     }
     YGNodeStyleSetDisplay(buttonNode_.get(), YGDisplayNone);
-    // Add prev/next button widths if needed
-    if (nCandidates_ && (hasPrev_ || hasNext_)) {
-        const auto &prev = theme.loadAction(*theme.inputPanel->prev);
-        const auto &next = theme.loadAction(*theme.inputPanel->next);
-        if (prev.valid() && next.valid()) {
+    if (nCandidates_) {
+        YGNodeStyleSetDisplay(buttonNode_.get(), YGDisplayFlex);
+        YGNodeStyleSetWidth(buttonNode_.get(), 66);
+    }
 
-            YGNodeStyleSetDisplay(buttonNode_.get(), YGDisplayFlex);
-            YGNodeStyleSetWidth(buttonNode_.get(), prev.width() + next.width());
-        }
+    YGNodeStyleSetDisplay(toolBarNode_.get(),
+                          showToolBar_ ? YGDisplayFlex : YGDisplayNone);
+    if (showToolBar_) {
+        YGNodeStyleSetHeight(toolBarNode_.get(), 40);
+        YGNodeStyleSetWidth(toolBarNode_.get(), 134);
+        YGNodeStyleSetMargin(toolBarNode_.get(), YGEdgeTop, 4);
+    }
+
+    YGNodeStyleSetDisplay(emojiPanelNode_.get(),
+                          showEmojiPanel_ ? YGDisplayFlex : YGDisplayNone);
+    if (showEmojiPanel_) {
+        YGNodeStyleSetWidth(emojiPanelNode_.get(), 360);
+        YGNodeStyleSetHeight(emojiPanelNode_.get(), 74);
+        YGNodeStyleSetMargin(emojiPanelNode_.get(), YGEdgeTop, 4);
     }
 
     // Calculate layout
