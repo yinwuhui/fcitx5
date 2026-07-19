@@ -81,10 +81,7 @@ public:
     }
     void secondaryActivate(int /*unused*/, int /*unused*/) {}
     std::string keyboardIconName() const {
-        if (isKDE()) {
-            return "input-keyboard";
-        }
-        return "input-keyboard-symbolic";
+        return "bubblefish";
     }
     std::string iconName() {
         std::string icon;
