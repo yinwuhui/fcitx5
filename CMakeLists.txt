@@ -36,6 +36,8 @@ option(ENABLE_SERVER "Build a fcitx as server, disable this option if you want t
 option(ENABLE_KEYBOARD "Enable key event translation with XKB and build keyboard engine" On)
 option(USE_SYSTEMD "Use systemd for event loop and dbus, will fallback to libuv/libdbus if not found. Only used when EVENT_LOOP_BACKEND is auto." On)
 option(ENABLE_XDGAUTOSTART "Enable xdg autostart desktop file installation" On)
+option(INSTALL_CONFIGTOOL_DESKTOP "Install the configuration desktop entry" On)
+option(INSTALL_WAYLAND_LAUNCHER_DESKTOP "Install the experimental Wayland launcher desktop entry" On)
 option(USE_FLATPAK_ICON "Use flatpak icon name for desktop files" Off)
 option(ENABLE_EMOJI "Enable emoji module" On)
 option(ENABLE_LIBUUID "Use libuuid for uuid generation" On)

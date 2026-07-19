@@ -4,6 +4,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/fcitx5-configtool.desktop.in.in
                ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-configtool.desktop.in @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/org.fcitx.Fcitx5.desktop.in.in
                ${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5.desktop.in @ONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/org.fcitx.Fcitx5-autostart.desktop.in.in
+               ${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5-autostart.desktop.in @ONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/fcitx5-diagnose.sh
                ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-diagnose ESCAPE_QUOTES @ONLY)
 
@@ -11,15 +13,23 @@ fcitx5_translate_desktop_file(${CMAKE_CURRENT_BINARY_DIR}/fcitx5-configtool.desk
                               fcitx5-configtool.desktop)
 fcitx5_translate_desktop_file(${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5.desktop.in
                               org.fcitx.Fcitx5.desktop)
+fcitx5_translate_desktop_file(${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5-autostart.desktop.in
+                              org.fcitx.Fcitx5-autostart.desktop)
 fcitx5_translate_desktop_file(org.fcitx.Fcitx5.metainfo.xml.in
                               org.fcitx.Fcitx5.metainfo.xml XML)
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5.desktop"
-              "${CMAKE_CURRENT_BINARY_DIR}/fcitx5-configtool.desktop"
+        RENAME bubblefish.desktop
         DESTINATION "${FCITX_INSTALL_DATADIR}/applications")
+if (INSTALL_CONFIGTOOL_DESKTOP)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/fcitx5-configtool.desktop"
+            DESTINATION "${FCITX_INSTALL_DATADIR}/applications")
+endif()
 
 if (ENABLE_XDGAUTOSTART)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5.desktop" DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/autostart)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5-autostart.desktop"
+            RENAME org.fcitx.Fcitx5.desktop
+            DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/autostart)
 endif()
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/org.fcitx.Fcitx5.metainfo.xml" DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
@@ -37,7 +47,7 @@ if (WAYLAND_FOUND AND ENABLE_X11)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/20-fcitx-x11" DESTINATION "${CMAKE_INSTALL_FULL_SYSCONFDIR}/xdg/Xwayland-session.d" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
 endif()
 
-if (ENABLE_DBUS AND WAYLAND_FOUND)
+if (ENABLE_DBUS AND WAYLAND_FOUND AND INSTALL_WAYLAND_LAUNCHER_DESKTOP)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/fcitx5-wayland-launcher.desktop.in.in
                    ${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wayland-launcher.desktop.in @ONLY)
     fcitx5_translate_desktop_file(${CMAKE_CURRENT_BINARY_DIR}/fcitx5-wayland-launcher.desktop.in
