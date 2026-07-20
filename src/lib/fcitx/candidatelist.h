@@ -31,6 +31,7 @@ class CursorModifiableCandidateList;
 class BulkCursorCandidateList;
 class ActionableCandidateList;
 class TabbedCandidateList;
+class GridCandidateList;
 
 class CandidateListPrivate;
 
@@ -133,6 +134,7 @@ public:
      * @since 5.1.20
      */
     TabbedCandidateList *toTabbed() const;
+    GridCandidateList *toGrid() const;
 
 protected:
     void setPageable(PageableCandidateList *list);
@@ -150,10 +152,19 @@ protected:
      * @since 5.1.20
      */
     void setTabbed(TabbedCandidateList *list);
+    void setGrid(GridCandidateList *list);
 
 private:
     std::unique_ptr<CandidateListPrivate> d_ptr;
     FCITX_DECLARE_PRIVATE(CandidateList);
+};
+
+/** Optional interface for candidate lists displayed as a row/column grid. */
+class FCITXCORE_EXPORT GridCandidateList {
+public:
+    virtual ~GridCandidateList();
+    virtual int columnCount(int row) const = 0;
+    virtual void select(int row, int column, InputContext *inputContext) = 0;
 };
 
 // useful for regular input method

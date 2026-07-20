@@ -93,6 +93,7 @@ public:
 ActionableCandidateList::~ActionableCandidateList() = default;
 
 TabbedCandidateList::~TabbedCandidateList() = default;
+GridCandidateList::~GridCandidateList() = default;
 
 class CandidateListPrivate {
 public:
@@ -104,6 +105,7 @@ public:
     CursorModifiableCandidateList *cursorModifiable_ = nullptr;
     ActionableCandidateList *actionable_ = nullptr;
     TabbedCandidateList *tabbed_ = nullptr;
+    GridCandidateList *grid_ = nullptr;
 };
 
 CandidateList::CandidateList()
@@ -153,6 +155,11 @@ TabbedCandidateList *CandidateList::toTabbed() const {
     return d->tabbed_;
 }
 
+GridCandidateList *CandidateList::toGrid() const {
+    FCITX_D();
+    return d->grid_;
+}
+
 void CandidateList::setBulk(BulkCandidateList *list) {
     FCITX_D();
     d->bulk_ = list;
@@ -191,6 +198,12 @@ void CandidateList::setActionable(ActionableCandidateList *list) {
 void CandidateList::setTabbed(TabbedCandidateList *list) {
     FCITX_D();
     d->tabbed_ = list;
+}
+
+
+void CandidateList::setGrid(GridCandidateList *list) {
+    FCITX_D();
+    d->grid_ = list;
 }
 
 class CandidateWordPrivate {

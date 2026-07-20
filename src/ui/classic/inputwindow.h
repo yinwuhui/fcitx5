@@ -147,6 +147,7 @@ protected:
     };
     std::vector<CandidateLayout> candidateLayouts_;
     std::vector<Rect> candidateRegions_;
+    std::vector<int> candidateTextLefts_;
     TrackableObjectReference<InputContext> inputContext_;
     bool visible_ = false;
     int cursor_ = 0;
@@ -166,6 +167,8 @@ protected:
     bool showToolBar_ = false;
     bool showEmojiPanel_ = false;
     int emojiCategory_ = 0;
+    bool emojiEnabled_ = true;
+    size_t emojiRecentLimit_ = 30;
     std::deque<std::string> recentEmojis_;
     bool prevHovered_ = false;
     bool nextHovered_ = false;
@@ -189,6 +192,7 @@ private:
     YGNodePtr emojiPanelNode_;
 
     void loadRecentEmojis();
+    void loadBubbleFishSettings();
     void rememberEmoji(const std::string &emoji);
 
     struct CandidateNode {

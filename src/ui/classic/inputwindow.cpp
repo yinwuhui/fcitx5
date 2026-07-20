@@ -13,6 +13,7 @@
 #include <functional>
 #include <filesystem>
 #include <fstream>
+#include <exception>
 #include <initializer_list>
 #include <limits>
 #include <string>
@@ -243,7 +244,37 @@ InputWindow::InputWindow(ClassicUI *parent) : parent_(parent) {
     YGNodeInsertChild(auxDownNode_.get(), auxDownTextNode_.get(), 0);
 
     YGNodeInsertChild(lowerNode_.get(), candidatesNode_.get(), 1);
+    loadBubbleFishSettings();
     loadRecentEmojis();
+}
+
+void InputWindow::loadBubbleFishSettings() {
+    const auto path = StandardPaths::global().userDirectory(
+                          StandardPathsType::Config) /
+                      "BubbleFish" / "BubbleFish Settings.conf";
+    std::ifstream stream(path);
+    std::string section;
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.front() == '[' && line.back() == ']') {
+            section = line.substr(1, line.size() - 2);
+            continue;
+        }
+        const auto separator = line.find('=');
+        if (separator == std::string::npos || section != "emoji") continue;
+        const auto key = line.substr(0, separator);
+        const auto value = line.substr(separator + 1);
+        if (key == "enabled") emojiEnabled_ = value == "true" || value == "1";
+        else if (key == "recent_limit") {
+            try { emojiRecentLimit_ = std::min<size_t>(100, std::stoul(value)); }
+            catch (const std::exception &) { emojiRecentLimit_ = 30; }
+        } else if (key == "default_category") {
+            constexpr std::array<std::string_view, 5> categories = {
+                "recent", "smileys", "people", "animals", "food"};
+            const auto found = std::find(categories.begin(), categories.end(), value);
+            if (found != categories.end()) emojiCategory_ = std::distance(categories.begin(), found);
+        }
+    }
 }
 
 void InputWindow::loadRecentEmojis() {
@@ -252,7 +283,7 @@ void InputWindow::loadRecentEmojis() {
                       "bubblefish" / "emoji-recent";
     std::ifstream stream(path);
     std::string emoji;
-    while (recentEmojis_.size() < 20 && std::getline(stream, emoji)) {
+    while (recentEmojis_.size() < emojiRecentLimit_ && std::getline(stream, emoji)) {
         if (!emoji.empty() &&
             std::find(recentEmojis_.begin(), recentEmojis_.end(), emoji) ==
                 recentEmojis_.end()) {
@@ -264,7 +295,7 @@ void InputWindow::loadRecentEmojis() {
 void InputWindow::rememberEmoji(const std::string &emoji) {
     std::erase(recentEmojis_, emoji);
     recentEmojis_.push_front(emoji);
-    while (recentEmojis_.size() > 20) {
+    while (recentEmojis_.size() > emojiRecentLimit_) {
         recentEmojis_.pop_back();
     }
 
@@ -389,12 +420,11 @@ void InputWindow::setTextToMultilineLayout(InputContext *inputContext,
         if (type == TextType::Regular &&
             line.toString().find('\t') != std::string::npos) {
             // Keep expanded columns aligned without the excessive fixed gap.
-            // Roughly four character cells fits a numbered Chinese candidate,
-            // plus one extra character of breathing room.
+            // A numbered two-character candidate plus one character of space.
             auto *tabs = pango_tab_array_new(10, true);
             for (int column = 0; column < 10; ++column) {
                 pango_tab_array_set_tab(tabs, column, PANGO_TAB_LEFT,
-                                        (column + 1) * 72);
+                                        (column + 1) * 64);
             }
             pango_layout_set_tabs(layout.lines_.back().get(), tabs);
             pango_tab_array_free(tabs);
@@ -683,7 +713,9 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
         emojiRegion_.setPosition(voiceRegion_.left() - 32,
                                  voiceRegion_.top());
         emojiRegion_.setSize(28, actionHeight);
-        drawBubbleFishIcon(cr, theme, emojiRegion_, "bubblefish-emoji");
+        if (emojiEnabled_) {
+            drawBubbleFishIcon(cr, theme, emojiRegion_, "bubblefish-emoji");
+        }
         drawBubbleFishIcon(cr, theme, voiceRegion_, "bubblefish-voice");
     } else {
         emojiRegion_ = Rect();
@@ -700,6 +732,8 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
 
     candidateRegions_.clear();
     candidateRegions_.reserve(nCandidates_);
+    candidateTextLefts_.clear();
+    candidateTextLefts_.reserve(nCandidates_);
 
     // Use yoga-based positioning for candidates
     for (size_t i = 0; i < nCandidates_; i++) {
@@ -709,6 +743,7 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
 
         float textLeft = absolute<YGNodeLayoutGetLeft>(candidateNodes_[i].text);
         float textTop = absolute<YGNodeLayoutGetTop>(candidateNodes_[i].text);
+        candidateTextLefts_.push_back(static_cast<int>(textLeft));
 
         float commentLeft =
             absolute<YGNodeLayoutGetLeft>(candidateNodes_[i].comment);
@@ -885,7 +920,7 @@ void InputWindow::click(int x, int y) {
     if (!inputContext) {
         return;
     }
-    if (emojiRegion_.contains(x, y)) {
+    if (emojiEnabled_ && emojiRegion_.contains(x, y)) {
         showEmojiPanel_ = !showEmojiPanel_;
         inputContext->updateUserInterface(UserInterfaceComponent::InputPanel);
         return;
@@ -912,6 +947,23 @@ void InputWindow::click(int x, int y) {
     const auto candidateList = inputContext->inputPanel().candidateList();
     if (!candidateList) {
         return;
+    }
+    if (auto *grid = candidateList->toGrid()) {
+        constexpr int GridColumnWidth = 64;
+        for (size_t row = 0; row < candidateRegions_.size() &&
+                             row < candidateTextLefts_.size();
+             ++row) {
+            if (!candidateRegions_[row].contains(x, y)) {
+                continue;
+            }
+            const int relativeX = x - candidateTextLefts_[row];
+            const int column = relativeX / GridColumnWidth;
+            if (relativeX >= 0 &&
+                column < grid->columnCount(static_cast<int>(row))) {
+                grid->select(static_cast<int>(row), column, inputContext);
+            }
+            return;
+        }
     }
     if (fullShapeRegion_.contains(x, y)) {
         if (auto *action = parent_->instance()

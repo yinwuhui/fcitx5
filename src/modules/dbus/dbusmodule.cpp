@@ -21,6 +21,7 @@
 #include <format>
 #include "fcitx-config/configuration.h"
 #include "fcitx-config/dbushelper.h"
+#include "fcitx-config/marshallfunction.h"
 #include "fcitx-config/rawconfig.h"
 #include "fcitx-utils/dbus/bus.h"
 #include "fcitx-utils/dbus/message.h"
@@ -36,12 +37,14 @@
 #include "fcitx/addoninfo.h"
 #include "fcitx/addoninstance.h"
 #include "fcitx/addonmanager.h"
+#include "fcitx/action.h"
 #include "fcitx/focusgroup.h"
 #include "fcitx/inputcontextmanager.h"
 #include "fcitx/inputmethodengine.h"
 #include "fcitx/inputmethodentry.h"
 #include "fcitx/inputmethodmanager.h"
 #include "fcitx/misc_p.h"
+#include "fcitx/userinterfacemanager.h"
 #include "config.h"
 #include "keyboard_public.h"
 
@@ -177,6 +180,45 @@ public:
     void activate() { instance_->activate(); }
     void deactivate() { instance_->deactivate(); }
     void toggle() { instance_->toggle(); }
+    void activateAction(const std::string &name) {
+        auto *ic = instance_->mostRecentInputContext();
+        if (!ic) {
+            return;
+        }
+        if (auto *action = instance_->userInterfaceManager().lookupAction(name)) {
+            action->activate(ic);
+        }
+    }
+    bool actionChecked(const std::string &name) {
+        auto *ic = instance_->mostRecentInputContext();
+        if (!ic) {
+            return false;
+        }
+        if (auto *action = instance_->userInterfaceManager().lookupAction(name)) {
+            return action->isChecked(ic);
+        }
+        return false;
+    }
+    std::string toggleShortcut() {
+        return Key::keyListToString(instance_->globalConfig().triggerKeys());
+    }
+    void setToggleShortcut(const std::string &shortcut) {
+        auto keys = Key::keyListFromString(shortcut);
+        if (keys.empty()) {
+            throw dbus::MethodCallError(
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                "Toggle shortcut must contain at least one valid key");
+        }
+        RawConfig config;
+        instance_->globalConfig().save(config);
+        marshallOption(config["Hotkey/TriggerKeys"], keys);
+        instance_->globalConfig().load(config, true);
+        if (!instance_->globalConfig().safeSave()) {
+            throw dbus::MethodCallError("org.freedesktop.DBus.Error.Failed",
+                                        "Unable to save global configuration");
+        }
+        instance_->reloadConfig();
+    }
     void resetInputMethodList() { instance_->resetInputMethodList(); }
     int state() { return instance_->state(); }
     void reloadConfig() { instance_->reloadConfig(); }
@@ -775,6 +817,10 @@ private:
     FCITX_OBJECT_VTABLE_METHOD(activate, "Activate", "", "");
     FCITX_OBJECT_VTABLE_METHOD(deactivate, "Deactivate", "", "");
     FCITX_OBJECT_VTABLE_METHOD(toggle, "Toggle", "", "");
+    FCITX_OBJECT_VTABLE_METHOD(activateAction, "ActivateAction", "s", "");
+    FCITX_OBJECT_VTABLE_METHOD(actionChecked, "ActionChecked", "s", "b");
+    FCITX_OBJECT_VTABLE_METHOD(toggleShortcut, "ToggleShortcut", "", "s");
+    FCITX_OBJECT_VTABLE_METHOD(setToggleShortcut, "SetToggleShortcut", "s", "");
     FCITX_OBJECT_VTABLE_METHOD(resetInputMethodList, "ResetIMList", "", "");
     FCITX_OBJECT_VTABLE_METHOD(state, "State", "", "i");
     FCITX_OBJECT_VTABLE_METHOD(reloadConfig, "ReloadConfig", "", "");
@@ -807,6 +853,46 @@ private:
                                "", "sssssssbsa{sv}");
 };
 
+// Product-facing control API.  Keeping this small interface separate from the
+// full Fcitx Controller1 contract lets BubbleFish UI clients remain stable if
+// upstream configuration internals change, and gives other platforms a clear
+// API to implement later.
+class BubbleFishController1 : public ObjectVTable<BubbleFishController1> {
+public:
+    explicit BubbleFishController1(Controller1 *controller)
+        : controller_(controller) {}
+
+    void activate() { controller_->activate(); }
+    void deactivate() { controller_->deactivate(); }
+    void toggle() { controller_->toggle(); }
+    int state() { return controller_->state(); }
+    std::string currentInputMethod() { return controller_->currentInputMethod(); }
+    void activateAction(const std::string &name) {
+        controller_->activateAction(name);
+    }
+    bool actionChecked(const std::string &name) {
+        return controller_->actionChecked(name);
+    }
+    std::string toggleShortcut() { return controller_->toggleShortcut(); }
+    void setToggleShortcut(const std::string &shortcut) {
+        controller_->setToggleShortcut(shortcut);
+    }
+    void reloadRime() { controller_->reloadAddonConfig("rime"); }
+
+private:
+    Controller1 *controller_;
+    FCITX_OBJECT_VTABLE_METHOD(activate, "Activate", "", "");
+    FCITX_OBJECT_VTABLE_METHOD(deactivate, "Deactivate", "", "");
+    FCITX_OBJECT_VTABLE_METHOD(toggle, "Toggle", "", "");
+    FCITX_OBJECT_VTABLE_METHOD(state, "State", "", "i");
+    FCITX_OBJECT_VTABLE_METHOD(currentInputMethod, "CurrentInputMethod", "", "s");
+    FCITX_OBJECT_VTABLE_METHOD(activateAction, "ActivateAction", "s", "");
+    FCITX_OBJECT_VTABLE_METHOD(actionChecked, "ActionChecked", "s", "b");
+    FCITX_OBJECT_VTABLE_METHOD(toggleShortcut, "ToggleShortcut", "", "s");
+    FCITX_OBJECT_VTABLE_METHOD(setToggleShortcut, "SetToggleShortcut", "s", "");
+    FCITX_OBJECT_VTABLE_METHOD(reloadRime, "ReloadRime", "", "");
+};
+
 DBusModule::DBusModule(Instance *instance)
     : instance_(instance), bus_(connectToSessionBus()),
       serviceWatcher_(std::make_unique<dbus::ServiceWatcher>(*bus_)) {
@@ -822,10 +908,22 @@ DBusModule::DBusModule(Instance *instance)
     controller_ = std::make_unique<Controller1>(this, instance);
     bus_->addObjectVTable("/controller", FCITX_CONTROLLER_DBUS_INTERFACE,
                           *controller_);
+    bubbleFishController_ =
+        std::make_unique<BubbleFishController1>(controller_.get());
+    bus_->addObjectVTable("/org/bubblefish/InputMethod",
+                          "org.bubblefish.InputMethod1",
+                          *bubbleFishController_);
     if (!bus_->requestName(FCITX_DBUS_SERVICE, requestFlag)) {
         instance_->exit();
         throw std::runtime_error("Unable to request dbus name. Is there "
                                  "another fcitx already running?");
+    }
+    // A product-owned well-known name keeps BubbleFish clients independent
+    // from Fcitx's public controller address. Failure is non-fatal so an
+    // upstream-compatible daemon can still start if another diagnostic tool
+    // temporarily owns the product name.
+    if (!bus_->requestName("org.bubblefish.InputMethod", requestFlag)) {
+        FCITX_WARN() << "Unable to acquire org.bubblefish.InputMethod";
     }
 
     disconnectedSlot_ = bus_->addMatch(

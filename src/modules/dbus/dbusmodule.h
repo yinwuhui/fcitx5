@@ -19,6 +19,7 @@
 
 namespace fcitx {
 class Controller1;
+class BubbleFishController1;
 class DBusModule : public AddonInstance {
 public:
     DBusModule(Instance *instance);
@@ -48,6 +49,7 @@ private:
         xkbWatcher_;
     std::string xkbHelperName_;
     std::unique_ptr<Controller1> controller_;
+    std::unique_ptr<BubbleFishController1> bubbleFishController_;
 };
 } // namespace fcitx
 
