@@ -13,8 +13,35 @@
 #include "fcitx/misc_p.h"
 #include "fcitx/userinterfacemanager.h"
 #include "notificationitem.h"
+#include "fcitx-utils/standardpaths.h"
+#include <cstdlib>
+#include <fstream>
+#include <string_view>
 
 namespace fcitx {
+
+namespace {
+bool bubbleFishUsesEnglish() {
+    const auto path = StandardPaths::global().userDirectory(
+                          StandardPathsType::Config) /
+                      "BubbleFish" / "BubbleFish Settings.conf";
+    std::ifstream stream(path);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line == "default_language=en_US") return true;
+        if (line == "default_language=zh_CN") return false;
+        if (line == "default_language=system") {
+            const char *locale = std::getenv("LC_ALL");
+            if (!locale || !*locale) locale = std::getenv("LANG");
+            return !locale || std::string_view(locale).substr(0, 2) != "zh";
+        }
+    }
+    return false;
+}
+const char *bubbleFishText(const char *chinese, const char *english) {
+    return bubbleFishUsesEnglish() ? english : chinese;
+}
+} // namespace
 
 //
 // libdbusmenu-gtk have a strange 30000 limitation, in order to leverage this,
@@ -241,7 +268,7 @@ void DBusMenu::fillLayoutProperties(
             appendProperty(properties, propertyNames, "children-display",
                            dbus::Variant("submenu"));
             appendProperty(properties, propertyNames, "label",
-                           dbus::Variant(_("Group")));
+                           dbus::Variant(bubbleFishText("分组", "Group")));
             break;
         case BII_Separator1:
         case BII_Separator2:
@@ -251,7 +278,8 @@ void DBusMenu::fillLayoutProperties(
         case BII_Configure:
             /* this icon sucks on KDE, why configure doesn't have "configure" */
             appendProperty(properties, propertyNames, "label",
-                           dbus::Variant(_("Input Method Settings")));
+                           dbus::Variant(bubbleFishText(
+                               "BubbleFish 设置", "BubbleFish Settings")));
             if (isKDE()) {
                 properties.emplace_back("icon-name",
                                         dbus::Variant("configure"));
@@ -259,13 +287,13 @@ void DBusMenu::fillLayoutProperties(
             break;
         case BII_Restart:
             appendProperty(properties, propertyNames, "label",
-                           dbus::Variant(_("Restart")));
+                           dbus::Variant(bubbleFishText("重新启动", "Restart")));
             appendProperty(properties, propertyNames, "icon-name",
                            dbus::Variant("view-refresh"));
             break;
         case BII_Exit:
             appendProperty(properties, propertyNames, "label",
-                           dbus::Variant(_("Exit")));
+                           dbus::Variant(bubbleFishText("退出", "Exit")));
             appendProperty(properties, propertyNames, "icon-name",
                            dbus::Variant("application-exit"));
             break;
