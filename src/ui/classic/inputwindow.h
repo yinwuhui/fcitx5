@@ -161,11 +161,16 @@ protected:
     Rect clipboardRegion_;
     Rect translateRegion_;
     Rect fullShapeRegion_;
+    Rect voiceCloseRegion_;
     std::vector<Rect> emojiCategoryRegions_;
     std::vector<Rect> emojiItemRegions_;
     std::vector<std::string> visibleEmojis_;
     bool showToolBar_ = false;
     bool showEmojiPanel_ = false;
+    bool voicePanel_ = false;
+    std::vector<double> voiceLevels_;
+    std::string voiceText_;
+    int voiceSelection_ = 0;
     int emojiCategory_ = 0;
     bool emojiEnabled_ = true;
     size_t emojiRecentLimit_ = 30;

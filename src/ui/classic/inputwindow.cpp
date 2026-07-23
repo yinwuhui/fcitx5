@@ -36,6 +36,7 @@
 #include <yoga/YGNodeStyle.h>
 #include "fcitx-utils/color.h"
 #include "fcitx-utils/log.h"
+#include "fcitx-utils/misc.h"
 #include "fcitx-utils/rect.h"
 #include "fcitx-utils/standardpaths.h"
 #include "fcitx-utils/textformatflags.h"
@@ -486,6 +487,8 @@ void InputWindow::setTextToLayout(
 
 std::pair<int, int> InputWindow::update(InputContext *inputContext) {
     hoverIndex_ = -1;
+    voicePanel_ = false;
+    voiceCloseRegion_ = Rect();
     if ((parent_->suspended() &&
          parent_->instance()->currentUI() != "kimpanel") ||
         !inputContext) {
@@ -505,10 +508,101 @@ std::pair<int, int> InputWindow::update(InputContext *inputContext) {
     auto &inputPanel = inputContext->inputPanel();
     inputContext_ = inputContext->watch();
 
+    const auto rawAuxUp = inputPanel.auxUp().toString();
+    constexpr std::string_view VoiceMarker = "\x1f"
+                                             "BFVOICE|";
+    if (rawAuxUp.starts_with(VoiceMarker)) {
+        voicePanel_ = true;
+        voiceLevels_.clear();
+        const auto payload = rawAuxUp.substr(VoiceMarker.size());
+        const auto levelSeparator = payload.find('|');
+        const auto selectionSeparator =
+            levelSeparator == std::string::npos
+                ? std::string::npos
+                : payload.find('|', levelSeparator + 1);
+        const auto levelText = payload.substr(0, levelSeparator);
+        try {
+            voiceSelection_ = std::max(
+                0, std::stoi(payload.substr(
+                       levelSeparator + 1,
+                       selectionSeparator - levelSeparator - 1)));
+        } catch (const std::exception &) {
+            voiceSelection_ = 0;
+        }
+        const auto recognizedText =
+            selectionSeparator == std::string::npos
+                ? std::string()
+                : payload.substr(selectionSeparator + 1);
+        voiceText_.clear();
+        int selectedStart = -1;
+        int selectedEnd = -1;
+        std::stringstream candidateStream(recognizedText);
+        std::string candidate;
+        int candidateIndex = 0;
+        while (std::getline(candidateStream, candidate)) {
+            if (candidate.empty()) continue;
+            if (!voiceText_.empty()) voiceText_.push_back('\n');
+            const int lineStart = static_cast<int>(voiceText_.size());
+            voiceText_ += candidateIndex == voiceSelection_ ? "› " : "  ";
+            voiceText_ += std::to_string(candidateIndex + 1) + ". " + candidate;
+            if (candidateIndex == voiceSelection_) {
+                selectedStart = lineStart;
+                selectedEnd = static_cast<int>(voiceText_.size());
+            }
+            ++candidateIndex;
+        }
+        size_t begin = 0;
+        while (begin < levelText.size()) {
+            const auto end = levelText.find(',', begin);
+            try {
+                voiceLevels_.push_back(std::clamp(
+                    std::stod(levelText.substr(begin, end - begin)), 0.0, 1.0));
+            } catch (const std::exception &) {
+                voiceLevels_.push_back(0.0);
+            }
+            if (end == std::string::npos) {
+                break;
+            }
+            begin = end + 1;
+        }
+        if (voiceText_.empty()) voiceText_ = "  1. 正在聆听…";
+        auto *fontDesc = pango_font_description_from_string(
+            parent_->config().font->c_str());
+        pango_context_set_font_description(context_.get(), fontDesc);
+        pango_font_description_free(fontDesc);
+        pango_layout_set_single_paragraph_mode(upperLayout_.get(), false);
+        pango_layout_set_width(upperLayout_.get(), 370 * PANGO_SCALE);
+        pango_layout_set_wrap(upperLayout_.get(), PANGO_WRAP_WORD_CHAR);
+        pango_layout_set_ellipsize(upperLayout_.get(), PANGO_ELLIPSIZE_END);
+        pango_layout_set_height(upperLayout_.get(), -5);
+        pango_layout_set_text(upperLayout_.get(), voiceText_.c_str(), -1);
+        auto *voiceAttributes = pango_attr_list_new();
+        if (selectedStart >= 0 && selectedEnd > selectedStart) {
+            auto *color = pango_attr_foreground_new(8 * 257, 124 * 257,
+                                                     242 * 257);
+            color->start_index = selectedStart;
+            color->end_index = selectedEnd;
+            pango_attr_list_insert(voiceAttributes, color);
+            auto *scale = pango_attr_scale_new(1.2);
+            scale->start_index = selectedStart;
+            scale->end_index = selectedEnd;
+            pango_attr_list_insert(voiceAttributes, scale);
+        }
+        pango_layout_set_attributes(upperLayout_.get(), voiceAttributes);
+        pango_attr_list_unref(voiceAttributes);
+        visible_ = true;
+        int textHeight = 0;
+        pango_layout_get_pixel_size(upperLayout_.get(), nullptr, &textHeight);
+        return {420, std::max(50, 24 + textHeight)};
+    }
+
     cursor_ = -1;
     auto preedit = instance->outputFilter(inputContext, inputPanel.preedit());
     auto auxUp = instance->outputFilter(inputContext, inputPanel.auxUp());
     pango_layout_set_single_paragraph_mode(upperLayout_.get(), true);
+    pango_layout_set_width(upperLayout_.get(), -1);
+    pango_layout_set_height(upperLayout_.get(), -1);
+    pango_layout_set_ellipsize(upperLayout_.get(), PANGO_ELLIPSIZE_NONE);
     setTextToLayout(inputContext, upperLayout_.get(), nullptr, nullptr,
                     {auxUp, preedit});
     if (preedit.cursor() >= 0 &&
@@ -673,6 +767,32 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
     cairo_save(cr);
 
     cairoSetSourceColor(cr, theme.inputPanelText());
+    if (voicePanel_) {
+        constexpr double AccentRed = 8.0 / 255.0;
+        constexpr double AccentGreen = 124.0 / 255.0;
+        constexpr double AccentBlue = 242.0 / 255.0;
+
+        voiceCloseRegion_.setPosition(382, 10);
+        voiceCloseRegion_.setSize(28, 28);
+        cairo_set_source_rgba(cr, AccentRed, AccentGreen, AccentBlue, 0.12);
+        roundedRectangle(cr, voiceCloseRegion_.left(),
+                         voiceCloseRegion_.top(), voiceCloseRegion_.width(),
+                         voiceCloseRegion_.height(), 8);
+        cairo_fill(cr);
+        cairo_set_source_rgb(cr, AccentRed, AccentGreen, AccentBlue);
+        cairo_set_line_width(cr, 2.0);
+        cairo_move_to(cr, 390, 18);
+        cairo_line_to(cr, 402, 30);
+        cairo_move_to(cr, 402, 18);
+        cairo_line_to(cr, 390, 30);
+        cairo_stroke(cr);
+
+        cairoSetSourceColor(cr, theme.inputPanelText());
+        renderLayout(cr, upperLayout_.get(), 18, 12);
+        cairo_restore(cr);
+        return;
+    }
+
     // CLASSICUI_DEBUG() << theme.inputPanel->normalColor->toString();
     auto *metrics = pango_context_get_metrics(
         context_.get(), pango_context_get_font_description(context_.get()),
@@ -918,6 +1038,10 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
 void InputWindow::click(int x, int y) {
     auto *inputContext = inputContext_.get();
     if (!inputContext) {
+        return;
+    }
+    if (voicePanel_ && voiceCloseRegion_.contains(x, y)) {
+        startProcess({"/usr/bin/bubblefish-voice-service", "--close"});
         return;
     }
     if (emojiEnabled_ && emojiRegion_.contains(x, y)) {
