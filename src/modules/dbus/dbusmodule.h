@@ -50,6 +50,7 @@ private:
     std::string xkbHelperName_;
     std::unique_ptr<Controller1> controller_;
     std::unique_ptr<BubbleFishController1> bubbleFishController_;
+    std::unique_ptr<HandlerTableEntry<EventHandler>> voiceKeyHandler_;
 };
 } // namespace fcitx
 
