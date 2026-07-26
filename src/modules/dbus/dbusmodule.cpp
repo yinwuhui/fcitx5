@@ -884,104 +884,55 @@ public:
             return;
         }
         if (auto *ic = instance_->mostRecentInputContext()) {
+            ic->inputPanel().reset();
+            ic->updatePreedit();
             ic->commitString(text);
         }
     }
-    void updateVoicePanel(const std::string &levels, const std::string &text) {
+    void updateVoicePanel(const std::string & /*levels*/,
+                          const std::string &text) {
         auto *ic = instance_->mostRecentInputContext();
         if (!ic) {
             return;
         }
         if (auto *previous = voiceInputContext_.get(); previous && previous != ic) {
             previous->inputPanel().reset();
+            previous->updatePreedit();
             previous->updateUserInterface(UserInterfaceComponent::InputPanel);
         }
         voiceInputContext_ = ic->watch();
-        voiceLevels_ = levels;
-        voiceCandidates_.clear();
-        std::stringstream lines(text);
-        std::string line;
-        while (std::getline(lines, line)) {
-            if (!line.empty()) {
-                voiceCandidates_.push_back(std::move(line));
-            }
-        }
-        if (voiceCandidates_.empty()) {
-            voiceCandidates_.push_back(text);
-        }
-        voiceSelection_ =
-            std::clamp(voiceSelection_, 0,
-                       static_cast<int>(voiceCandidates_.size()) - 1);
-        refreshVoicePanel(ic);
-    }
-    bool handleVoiceKey(KeyEvent &event) {
-        if (event.isRelease() || event.inputContext() != voiceInputContext_.get() ||
-            voiceCandidates_.empty()) {
-            return false;
-        }
-        const auto key = event.key();
-        int selected = key.digitSelection();
-        if (selected >= 0 &&
-            selected < static_cast<int>(voiceCandidates_.size())) {
-            chooseVoiceCandidate(selected);
-        } else if (key.check(FcitxKey_Up)) {
-            voiceSelection_ =
-                (voiceSelection_ + voiceCandidates_.size() - 1) %
-                voiceCandidates_.size();
-            refreshVoicePanel(event.inputContext());
-        } else if (key.check(FcitxKey_Down)) {
-            voiceSelection_ =
-                (voiceSelection_ + 1) % voiceCandidates_.size();
-            refreshVoicePanel(event.inputContext());
-        } else if (key.check(FcitxKey_Return) ||
-                   key.check(FcitxKey_KP_Enter)) {
-            chooseVoiceCandidate(voiceSelection_);
-        } else {
-            return false;
-        }
-        event.filterAndAccept();
-        return true;
-    }
-    void refreshVoicePanel(InputContext *ic) {
-        std::string text;
-        for (size_t i = 0; i < voiceCandidates_.size(); ++i) {
-            if (i) text.push_back('\n');
-            text += voiceCandidates_[i];
-        }
-        // A private marker keeps the product DBus API independent from the
-        // Classic UI implementation while still letting the input-method
-        // popup surface render correctly on both Wayland and X11.
-        Text panelText("\x1f"
-                       "BFVOICE|" +
-                       voiceLevels_ + "|" + std::to_string(voiceSelection_) +
-                       "|" + text);
         ic->inputPanel().reset();
-        ic->inputPanel().setAuxUp(panelText);
+        if (!text.empty()) {
+            Text preedit(text);
+            preedit.setCursor(text.size());
+            ic->inputPanel().setClientPreedit(preedit);
+        }
+        ic->updatePreedit();
+        showVoiceIndicator(ic);
+    }
+
+    void showVoiceIndicator(InputContext *ic) {
+        // The marker renders only a compact microphone indicator at the
+        // current cursor. Recognized text stays in the application's client
+        // preedit and is never represented as a candidate list.
+        ic->inputPanel().setAuxUp(Text("\x1f"
+                                      "BFVOICE"));
         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
     }
-    void chooseVoiceCandidate(int index) {
-        startProcess({"/usr/bin/bubblefish-voice-service", "--select",
-                      std::to_string(index)});
-        hideVoicePanel();
-    }
+
     void hideVoicePanel() {
         if (auto *ic = voiceInputContext_.get()) {
             ic->inputPanel().reset();
+            ic->updatePreedit();
             ic->updateUserInterface(UserInterfaceComponent::InputPanel);
         }
         voiceInputContext_.unwatch();
-        voiceLevels_.clear();
-        voiceCandidates_.clear();
-        voiceSelection_ = 0;
     }
 
 private:
     Controller1 *controller_;
     Instance *instance_;
     TrackableObjectReference<InputContext> voiceInputContext_;
-    std::string voiceLevels_;
-    std::vector<std::string> voiceCandidates_;
-    int voiceSelection_ = 0;
     FCITX_OBJECT_VTABLE_METHOD(activate, "Activate", "", "");
     FCITX_OBJECT_VTABLE_METHOD(deactivate, "Deactivate", "", "");
     FCITX_OBJECT_VTABLE_METHOD(toggle, "Toggle", "", "");
@@ -1029,11 +980,6 @@ DBusModule::DBusModule(Instance *instance)
     if (!bus_->requestName("org.bubblefish.InputMethod", requestFlag)) {
         FCITX_WARN() << "Unable to acquire org.bubblefish.InputMethod";
     }
-    voiceKeyHandler_ = instance_->watchEvent<EventType::InputContextKeyEvent>(
-        EventWatcherPhase::PreInputMethod, [this](KeyEvent &event) {
-            bubbleFishController_->handleVoiceKey(event);
-        });
-
     disconnectedSlot_ = bus_->addMatch(
         dbus::MatchRule("org.freedesktop.DBus.Local",
                         "/org/freedesktop/DBus/Local",

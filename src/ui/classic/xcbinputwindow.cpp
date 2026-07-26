@@ -149,11 +149,32 @@ void XCBInputWindow::updatePosition(InputContext *inputContext) {
         return;
     }
 
-    const Rect &cursorRect = inputContext->cursorRect();
-    const Rect *closestScreen = getClosestScreen(cursorRect);
     xcb_params_configure_window_t wc;
-    wc.x = calculatePositionX(cursorRect, closestScreen);
-    wc.y = calculatePositionY(cursorRect, closestScreen);
+    const Rect &cursorRect = inputContext->cursorRect();
+    const bool inputContextChanged =
+        anchoredInputContext_.get() != inputContext;
+    if (!positionAnchored_ || inputContextChanged || newComposition_) {
+        const Rect *closestScreen = getClosestScreen(cursorRect);
+        anchoredX_ = calculatePositionX(cursorRect, closestScreen);
+        const int newY = calculatePositionY(cursorRect, closestScreen);
+        const int sameLineTolerance =
+            std::max(20, std::max(1, cursorRect.height()) * 2);
+        // Keep Y stable only within one composition. Once text has been
+        // committed and a new composition starts, applications may report a
+        // different caret rectangle even on the same visual line. Reusing the
+        // previous Y in that case can place the panel over committed glyphs.
+        if (!positionAnchored_ || inputContextChanged || newComposition_ ||
+            std::abs(cursorRect.top() - anchoredCursorTop_) >
+                sameLineTolerance) {
+            anchoredY_ = newY;
+        }
+        anchoredCursorTop_ = cursorRect.top();
+        anchoredInputContext_ = inputContext->watch();
+        positionAnchored_ = true;
+        newComposition_ = false;
+    }
+    wc.x = anchoredX_;
+    wc.y = anchoredY_;
     wc.stack_mode = XCB_STACK_MODE_ABOVE;
     xcb_aux_configure_window(ui_->connection(), wid_,
                              XCB_CONFIG_WINDOW_STACK_MODE |
@@ -184,6 +205,7 @@ void XCBInputWindow::update(InputContext *inputContext) {
         }
         return;
     }
+    newComposition_ = !oldVisible;
 
     if (width != this->width() || height != this->height()) {
         resize(width, height);

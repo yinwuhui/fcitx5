@@ -26,8 +26,19 @@ bool bubbleFishUsesEnglish() {
                           StandardPathsType::Config) /
                       "BubbleFish" / "BubbleFish Settings.conf";
     std::ifstream stream(path);
+    std::string section;
     std::string line;
     while (std::getline(stream, line)) {
+        if (!line.empty() && line.front() == '[' && line.back() == ']') {
+            section = line.substr(1, line.size() - 2);
+            continue;
+        }
+        // QSettings escapes its reserved "General" section as "%General".
+        // Accept both its serialized spelling and conventional INI spelling.
+        if (section != "general" && section != "General" &&
+            section != "%General") {
+            continue;
+        }
         if (line == "default_language=en_US") return true;
         if (line == "default_language=zh_CN") return false;
         if (line == "default_language=system") {
@@ -279,7 +290,7 @@ void DBusMenu::fillLayoutProperties(
             /* this icon sucks on KDE, why configure doesn't have "configure" */
             appendProperty(properties, propertyNames, "label",
                            dbus::Variant(bubbleFishText(
-                               "BubbleFish 设置", "BubbleFish Settings")));
+                               "泡泡鱼设置", "BubbleFish Settings")));
             if (isKDE()) {
                 properties.emplace_back("icon-name",
                                         dbus::Variant("configure"));
@@ -308,8 +319,12 @@ void DBusMenu::fillLayoutProperties(
         if (!entry) {
             return;
         }
+        const auto entryName =
+            entry->name() == "BubbleFish"
+                ? std::string(bubbleFishText("泡泡鱼", "BubbleFish"))
+                : entry->name();
         appendProperty(properties, propertyNames, "label",
-                       dbus::Variant(entry->name()));
+                       dbus::Variant(entryName));
         if (!entry->icon().empty()) {
             appendProperty(properties, propertyNames, "icon-name",
                            dbus::Variant(IconTheme::iconName(entry->icon())));

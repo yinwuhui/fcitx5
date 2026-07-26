@@ -39,6 +39,12 @@ private:
 
     xcb_atom_t atomBlur_;
     int dpi_ = -1;
+    bool positionAnchored_ = false;
+    bool newComposition_ = false;
+    int anchoredX_ = 0;
+    int anchoredY_ = 0;
+    int anchoredCursorTop_ = 0;
+    TrackableObjectReference<InputContext> anchoredInputContext_;
 };
 
 } // namespace fcitx::classicui

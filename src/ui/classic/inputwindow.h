@@ -90,10 +90,13 @@ public:
 
     int size() const { return lines_.size(); }
     void render(cairo_t *cr, int x, int y, bool highlight);
+    void renderHighlightBackground(cairo_t *cr, int x, int y,
+                                   bool wholeLayout);
 
     std::vector<GObjectUniquePtr<PangoLayout>> lines_;
     std::vector<PangoAttrListUniquePtr> attrLists_;
     std::vector<PangoAttrListUniquePtr> highlightAttrLists_;
+    std::vector<std::vector<std::pair<int, int>>> highlightRanges_;
 };
 
 class InputWindow {
@@ -130,6 +133,7 @@ protected:
     void setTextToMultilineLayout(InputContext *inputContext,
                                   MultilineLayout &layout, const Text &text,
                                   TextType type);
+    void configureGridColumns(const GridCandidateList &grid);
     int highlight() const;
     void updateYogaLayout();
     void renderYogaNode(cairo_t *cr, YGNodeRef node);
@@ -148,6 +152,7 @@ protected:
     std::vector<CandidateLayout> candidateLayouts_;
     std::vector<Rect> candidateRegions_;
     std::vector<int> candidateTextLefts_;
+    std::vector<int> gridColumnStarts_;
     TrackableObjectReference<InputContext> inputContext_;
     bool visible_ = false;
     int cursor_ = 0;
@@ -161,18 +166,15 @@ protected:
     Rect clipboardRegion_;
     Rect translateRegion_;
     Rect fullShapeRegion_;
-    Rect voiceCloseRegion_;
     std::vector<Rect> emojiCategoryRegions_;
     std::vector<Rect> emojiItemRegions_;
     std::vector<std::string> visibleEmojis_;
     bool showToolBar_ = false;
     bool showEmojiPanel_ = false;
     bool voicePanel_ = false;
-    std::vector<double> voiceLevels_;
-    std::string voiceText_;
-    int voiceSelection_ = 0;
     int emojiCategory_ = 0;
     bool emojiEnabled_ = true;
+    bool showTemporaryPinyin_ = false;
     size_t emojiRecentLimit_ = 30;
     std::deque<std::string> recentEmojis_;
     bool prevHovered_ = false;
@@ -180,6 +182,11 @@ protected:
     int candidateIndex_ = -1;
     CandidateLayoutHint layoutHint_ = CandidateLayoutHint::NotSet;
     int hoverIndex_ = -1;
+    int hoverGridColumn_ = -1;
+    bool mouseHoverActive_ = false;
+    bool suppressInitialHover_ = false;
+    int initialHoverX_ = -1;
+    int initialHoverY_ = -1;
 
 private:
     std::pair<unsigned int, unsigned int> sizeHint();

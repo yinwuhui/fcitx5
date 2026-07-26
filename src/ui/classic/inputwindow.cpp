@@ -59,6 +59,7 @@ namespace {
 
 constexpr std::array<std::string_view, 5> EmojiCategoryLabels = {
     "最近", "笑脸", "人物", "动物", "食物"};
+constexpr int CandidateGap = 8;
 
 const std::array<std::vector<std::string>, 4> EmojiCategories = {{
     {"😀", "😃", "😄", "😁", "😂", "🥰", "😍", "😊", "😉", "😎",
@@ -204,6 +205,43 @@ void MultilineLayout::render(cairo_t *cr, int x, int y, bool highlight) {
     }
 }
 
+void MultilineLayout::renderHighlightBackground(cairo_t *cr, int x, int y,
+                                                bool wholeLayout) {
+    const int lineHeight = fontHeight();
+    for (size_t lineIndex = 0; lineIndex < lines_.size(); ++lineIndex) {
+        auto *layout = lines_[lineIndex].get();
+        std::vector<std::pair<int, int>> ranges;
+        if (wholeLayout) {
+            ranges.emplace_back(0, -1);
+        } else if (lineIndex < highlightRanges_.size()) {
+            ranges = highlightRanges_[lineIndex];
+        }
+        for (const auto &[start, end] : ranges) {
+            PangoRectangle startRect{};
+            pango_layout_index_to_pos(layout, start, &startRect);
+            int left = PANGO_PIXELS(startRect.x);
+            int right = 0;
+            if (end < 0) {
+                int layoutWidth = 0;
+                pango_layout_get_pixel_size(layout, &layoutWidth, nullptr);
+                right = layoutWidth;
+            } else {
+                PangoRectangle endRect{};
+                pango_layout_index_to_pos(layout, end, &endRect);
+                right = PANGO_PIXELS(endRect.x);
+            }
+            if (right <= left) {
+                continue;
+            }
+            cairoSetSourceColor(cr, Color("#087CF2"));
+            roundedRectangle(cr, x + left - 4,
+                             y + static_cast<int>(lineIndex) * lineHeight - 2,
+                             right - left + 8, lineHeight + 4, 6);
+            cairo_fill(cr);
+        }
+    }
+}
+
 InputWindow::InputWindow(ClassicUI *parent) : parent_(parent) {
     fontMap_.reset(pango_cairo_font_map_new());
     // Although documentation says it is 96 by default, try not rely on this
@@ -250,6 +288,10 @@ InputWindow::InputWindow(ClassicUI *parent) : parent_(parent) {
 }
 
 void InputWindow::loadBubbleFishSettings() {
+    // Missing keys intentionally fall back to the product defaults.
+    showTemporaryPinyin_ = false;
+    emojiEnabled_ = true;
+    emojiRecentLimit_ = 30;
     const auto path = StandardPaths::global().userDirectory(
                           StandardPathsType::Config) /
                       "BubbleFish" / "BubbleFish Settings.conf";
@@ -262,18 +304,28 @@ void InputWindow::loadBubbleFishSettings() {
             continue;
         }
         const auto separator = line.find('=');
-        if (separator == std::string::npos || section != "emoji") continue;
+        if (separator == std::string::npos) continue;
         const auto key = line.substr(0, separator);
         const auto value = line.substr(separator + 1);
-        if (key == "enabled") emojiEnabled_ = value == "true" || value == "1";
-        else if (key == "recent_limit") {
-            try { emojiRecentLimit_ = std::min<size_t>(100, std::stoul(value)); }
-            catch (const std::exception &) { emojiRecentLimit_ = 30; }
-        } else if (key == "default_category") {
+        if (section == "candidate" && key == "show_temporary_pinyin") {
+            showTemporaryPinyin_ = value == "true" || value == "1";
+        } else if (section == "emoji" && key == "enabled") {
+            emojiEnabled_ = value == "true" || value == "1";
+        } else if (section == "emoji" && key == "recent_limit") {
+            try {
+                emojiRecentLimit_ =
+                    std::min<size_t>(100, std::stoul(value));
+            } catch (const std::exception &) {
+                emojiRecentLimit_ = 30;
+            }
+        } else if (section == "emoji" && key == "default_category") {
             constexpr std::array<std::string_view, 5> categories = {
                 "recent", "smileys", "people", "animals", "food"};
-            const auto found = std::find(categories.begin(), categories.end(), value);
-            if (found != categories.end()) emojiCategory_ = std::distance(categories.begin(), found);
+            const auto found =
+                std::find(categories.begin(), categories.end(), value);
+            if (found != categories.end()) {
+                emojiCategory_ = std::distance(categories.begin(), found);
+            }
         }
     }
 }
@@ -314,9 +366,6 @@ void InputWindow::rememberEmoji(const std::string &emoji) {
 void InputWindow::insertAttr(PangoAttrList *attrList, TextFormatFlags format,
                              int start, int end, bool highlight,
                              TextType type) const {
-    const bool selectedCandidate =
-        type == TextType::Regular &&
-        (highlight || format.test(TextFormatFlag::HighLight));
     if (format & TextFormatFlag::Underline) {
         auto *attr = pango_attr_underline_new(PANGO_UNDERLINE_SINGLE);
         attr->start_index = start;
@@ -341,30 +390,21 @@ void InputWindow::insertAttr(PangoAttrList *attrList, TextFormatFlags format,
         attr->end_index = end;
         pango_attr_list_insert(attrList, attr);
     }
-    if (selectedCandidate) {
-        // Make the selected candidate two typographic steps larger without
-        // changing the configured base font size.
-        auto *attr = pango_attr_scale_new(1.2);
-        attr->start_index = start;
-        attr->end_index = end;
-        pango_attr_list_insert(attrList, attr);
-    }
-    Color color;
-    if (selectedCandidate) {
-        // Midpoint of BubbleFish logo's primary blue gradient.
-        color = Color("#087CF2");
-    } else if (format & TextFormatFlag::HighLight) {
-        color = parent_->theme().inputPanelHighlightText();
-    } else {
-        Color table[2][3] = {
-            {parent_->theme().inputPanelCandidateLabelText(),
-             parent_->theme().inputPanelText(),
-             parent_->theme().inputPanelCandidateCommentText()},
-            {parent_->theme().inputPanelHighlightCandidateLabelText(),
-             parent_->theme().inputPanelHighlightCandidateText(),
-             parent_->theme().inputPanelHighlightCandidateCommentText()}};
-        color = table[highlight][static_cast<int>(type)];
-    }
+    // Keep the glyph size unchanged, but use the highlighted foreground over
+    // BubbleFish's blue rounded selection background. Text carrying an
+    // explicit HighLight flag is used by individual cells in the grid layout.
+    const bool selected =
+        highlight || format.test(TextFormatFlag::HighLight);
+    Color normalTable[3] = {
+        parent_->theme().inputPanelCandidateLabelText(),
+        parent_->theme().inputPanelText(),
+        parent_->theme().inputPanelCandidateCommentText()};
+    Color selectedTable[3] = {
+        parent_->theme().inputPanelHighlightCandidateLabelText(),
+        parent_->theme().inputPanelHighlightCandidateText(),
+        parent_->theme().inputPanelHighlightCandidateCommentText()};
+    Color color = (selected ? selectedTable : normalTable)
+                      [static_cast<int>(type)];
     const auto scale = std::numeric_limits<uint16_t>::max();
     auto *attr = pango_attr_foreground_new(
         color.redF() * scale, color.greenF() * scale, color.blueF() * scale);
@@ -415,27 +455,97 @@ void InputWindow::setTextToMultilineLayout(InputContext *inputContext,
     layout.lines_.clear();
     layout.attrLists_.clear();
     layout.highlightAttrLists_.clear();
+    layout.highlightRanges_.clear();
 
     for (const auto &line : lines) {
         layout.lines_.emplace_back(pango_layout_new(context_.get()));
-        if (type == TextType::Regular &&
-            line.toString().find('\t') != std::string::npos) {
-            // Keep expanded columns aligned without the excessive fixed gap.
-            // A numbered two-character candidate plus one character of space.
-            auto *tabs = pango_tab_array_new(10, true);
-            for (int column = 0; column < 10; ++column) {
-                pango_tab_array_set_tab(tabs, column, PANGO_TAB_LEFT,
-                                        (column + 1) * 64);
-            }
-            pango_layout_set_tabs(layout.lines_.back().get(), tabs);
-            pango_tab_array_free(tabs);
-        }
         layout.attrLists_.emplace_back();
         layout.highlightAttrLists_.emplace_back();
+        layout.highlightRanges_.emplace_back();
+        int byteOffset = 0;
+        int rangeStart = -1;
+        for (size_t i = 0; i < line.size(); ++i) {
+            const auto part = line.stringAt(i);
+            const bool selected =
+                line.formatAt(i).test(TextFormatFlag::HighLight);
+            if (selected && rangeStart < 0) {
+                rangeStart = byteOffset;
+            } else if (!selected && rangeStart >= 0) {
+                layout.highlightRanges_.back().emplace_back(rangeStart,
+                                                            byteOffset);
+                rangeStart = -1;
+            }
+            byteOffset += static_cast<int>(part.size());
+        }
+        if (rangeStart >= 0) {
+            layout.highlightRanges_.back().emplace_back(rangeStart,
+                                                        byteOffset);
+        }
         setTextToLayout(inputContext, layout.lines_.back().get(),
                         &layout.attrLists_.back(),
                         &layout.highlightAttrLists_.back(), {line}, type);
     }
+}
+
+void InputWindow::configureGridColumns(const GridCandidateList &grid) {
+    int columnCount = 0;
+    for (size_t row = 0; row < nCandidates_; ++row) {
+        columnCount =
+            std::max(columnCount, grid.columnCount(static_cast<int>(row)));
+    }
+    gridColumnStarts_.clear();
+    if (columnCount <= 0) {
+        return;
+    }
+
+    std::vector<int> maximumWidths(columnCount, 0);
+    auto measurement = newPangoLayout(context_.get());
+    pango_layout_set_single_paragraph_mode(measurement.get(), true);
+    for (size_t row = 0; row < nCandidates_; ++row) {
+        if (candidateLayouts_[row].text.lines_.empty()) {
+            continue;
+        }
+        const char *raw =
+            pango_layout_get_text(candidateLayouts_[row].text.lines_[0].get());
+        std::string_view remaining(raw ? raw : "");
+        for (int column = 0; column < columnCount; ++column) {
+            const auto separator = remaining.find('\t');
+            const auto cell = remaining.substr(0, separator);
+            pango_layout_set_text(measurement.get(), cell.data(),
+                                  static_cast<int>(cell.size()));
+            int cellWidth = 0;
+            pango_layout_get_pixel_size(measurement.get(), &cellWidth,
+                                        nullptr);
+            maximumWidths[column] =
+                std::max(maximumWidths[column], cellWidth);
+            if (separator == std::string_view::npos) {
+                break;
+            }
+            remaining.remove_prefix(separator + 1);
+        }
+    }
+
+    gridColumnStarts_.resize(columnCount, 0);
+    for (int column = 1; column < columnCount; ++column) {
+        gridColumnStarts_[column] =
+            gridColumnStarts_[column - 1] + maximumWidths[column - 1] +
+            CandidateGap;
+    }
+
+    if (columnCount == 1) {
+        return;
+    }
+    auto *tabs = pango_tab_array_new(columnCount - 1, true);
+    for (int column = 1; column < columnCount; ++column) {
+        pango_tab_array_set_tab(tabs, column - 1, PANGO_TAB_LEFT,
+                                gridColumnStarts_[column]);
+    }
+    for (size_t row = 0; row < nCandidates_; ++row) {
+        for (auto &line : candidateLayouts_[row].text.lines_) {
+            pango_layout_set_tabs(line.get(), tabs);
+        }
+    }
+    pango_tab_array_free(tabs);
 }
 
 void InputWindow::setTextToLayout(
@@ -486,13 +596,20 @@ void InputWindow::setTextToLayout(
 }
 
 std::pair<int, int> InputWindow::update(InputContext *inputContext) {
+    const bool wasVisible = visible_;
     hoverIndex_ = -1;
     voicePanel_ = false;
-    voiceCloseRegion_ = Rect();
+    if (!wasVisible) {
+        // Settings changes do not necessarily reconstruct ClassicUI. Reload
+        // once at the beginning of every new composition.
+        loadBubbleFishSettings();
+    }
     if ((parent_->suspended() &&
          parent_->instance()->currentUI() != "kimpanel") ||
         !inputContext) {
         visible_ = false;
+        showToolBar_ = false;
+        showEmojiPanel_ = false;
         return {0, 0};
     }
     // | aux up | preedit
@@ -510,95 +627,20 @@ std::pair<int, int> InputWindow::update(InputContext *inputContext) {
 
     const auto rawAuxUp = inputPanel.auxUp().toString();
     constexpr std::string_view VoiceMarker = "\x1f"
-                                             "BFVOICE|";
+                                             "BFVOICE";
     if (rawAuxUp.starts_with(VoiceMarker)) {
         voicePanel_ = true;
-        voiceLevels_.clear();
-        const auto payload = rawAuxUp.substr(VoiceMarker.size());
-        const auto levelSeparator = payload.find('|');
-        const auto selectionSeparator =
-            levelSeparator == std::string::npos
-                ? std::string::npos
-                : payload.find('|', levelSeparator + 1);
-        const auto levelText = payload.substr(0, levelSeparator);
-        try {
-            voiceSelection_ = std::max(
-                0, std::stoi(payload.substr(
-                       levelSeparator + 1,
-                       selectionSeparator - levelSeparator - 1)));
-        } catch (const std::exception &) {
-            voiceSelection_ = 0;
-        }
-        const auto recognizedText =
-            selectionSeparator == std::string::npos
-                ? std::string()
-                : payload.substr(selectionSeparator + 1);
-        voiceText_.clear();
-        int selectedStart = -1;
-        int selectedEnd = -1;
-        std::stringstream candidateStream(recognizedText);
-        std::string candidate;
-        int candidateIndex = 0;
-        while (std::getline(candidateStream, candidate)) {
-            if (candidate.empty()) continue;
-            if (!voiceText_.empty()) voiceText_.push_back('\n');
-            const int lineStart = static_cast<int>(voiceText_.size());
-            voiceText_ += candidateIndex == voiceSelection_ ? "› " : "  ";
-            voiceText_ += std::to_string(candidateIndex + 1) + ". " + candidate;
-            if (candidateIndex == voiceSelection_) {
-                selectedStart = lineStart;
-                selectedEnd = static_cast<int>(voiceText_.size());
-            }
-            ++candidateIndex;
-        }
-        size_t begin = 0;
-        while (begin < levelText.size()) {
-            const auto end = levelText.find(',', begin);
-            try {
-                voiceLevels_.push_back(std::clamp(
-                    std::stod(levelText.substr(begin, end - begin)), 0.0, 1.0));
-            } catch (const std::exception &) {
-                voiceLevels_.push_back(0.0);
-            }
-            if (end == std::string::npos) {
-                break;
-            }
-            begin = end + 1;
-        }
-        if (voiceText_.empty()) voiceText_ = "  1. 正在聆听…";
-        auto *fontDesc = pango_font_description_from_string(
-            parent_->config().font->c_str());
-        pango_context_set_font_description(context_.get(), fontDesc);
-        pango_font_description_free(fontDesc);
-        pango_layout_set_single_paragraph_mode(upperLayout_.get(), false);
-        pango_layout_set_width(upperLayout_.get(), 370 * PANGO_SCALE);
-        pango_layout_set_wrap(upperLayout_.get(), PANGO_WRAP_WORD_CHAR);
-        pango_layout_set_ellipsize(upperLayout_.get(), PANGO_ELLIPSIZE_END);
-        pango_layout_set_height(upperLayout_.get(), -5);
-        pango_layout_set_text(upperLayout_.get(), voiceText_.c_str(), -1);
-        auto *voiceAttributes = pango_attr_list_new();
-        if (selectedStart >= 0 && selectedEnd > selectedStart) {
-            auto *color = pango_attr_foreground_new(8 * 257, 124 * 257,
-                                                     242 * 257);
-            color->start_index = selectedStart;
-            color->end_index = selectedEnd;
-            pango_attr_list_insert(voiceAttributes, color);
-            auto *scale = pango_attr_scale_new(1.2);
-            scale->start_index = selectedStart;
-            scale->end_index = selectedEnd;
-            pango_attr_list_insert(voiceAttributes, scale);
-        }
-        pango_layout_set_attributes(upperLayout_.get(), voiceAttributes);
-        pango_attr_list_unref(voiceAttributes);
         visible_ = true;
-        int textHeight = 0;
-        pango_layout_get_pixel_size(upperLayout_.get(), nullptr, &textHeight);
-        return {420, std::max(50, 24 + textHeight)};
+        return {42, 42};
     }
 
     cursor_ = -1;
     auto preedit = instance->outputFilter(inputContext, inputPanel.preedit());
     auto auxUp = instance->outputFilter(inputContext, inputPanel.auxUp());
+    if (!showTemporaryPinyin_) {
+        preedit = Text();
+        auxUp = Text();
+    }
     pango_layout_set_single_paragraph_mode(upperLayout_.get(), true);
     pango_layout_set_width(upperLayout_.get(), -1);
     pango_layout_set_height(upperLayout_.get(), -1);
@@ -671,6 +713,11 @@ std::pair<int, int> InputWindow::update(InputContext *inputContext) {
         }
 
         layoutHint_ = candidateList->layoutHint();
+        if (auto *grid = candidateList->toGrid()) {
+            configureGridColumns(*grid);
+        } else {
+            gridColumnStarts_.clear();
+        }
         if (auto *pageable = candidateList->toPageable()) {
             hasPrev_ = pageable->hasPrev();
             hasNext_ = pageable->hasNext();
@@ -679,6 +726,7 @@ std::pair<int, int> InputWindow::update(InputContext *inputContext) {
             hasNext_ = false;
         }
     } else {
+        gridColumnStarts_.clear();
         nCandidates_ = 0;
         candidateIndex_ = -1;
         hasPrev_ = false;
@@ -696,6 +744,18 @@ std::pair<int, int> InputWindow::update(InputContext *inputContext) {
             width = height = 0;
             visible_ = false;
         }
+    }
+    if (!visible_) {
+        showToolBar_ = false;
+        showEmojiPanel_ = false;
+        mouseHoverActive_ = false;
+        hoverGridColumn_ = -1;
+    } else if (!wasVisible) {
+        // Mapping a window underneath a stationary pointer can generate an
+        // artificial first hover event. Wait until the pointer actually moves.
+        suppressInitialHover_ = true;
+        initialHoverX_ = -1;
+        initialHoverY_ = -1;
     }
     return {width, height};
 }
@@ -768,27 +828,9 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
 
     cairoSetSourceColor(cr, theme.inputPanelText());
     if (voicePanel_) {
-        constexpr double AccentRed = 8.0 / 255.0;
-        constexpr double AccentGreen = 124.0 / 255.0;
-        constexpr double AccentBlue = 242.0 / 255.0;
-
-        voiceCloseRegion_.setPosition(382, 10);
-        voiceCloseRegion_.setSize(28, 28);
-        cairo_set_source_rgba(cr, AccentRed, AccentGreen, AccentBlue, 0.12);
-        roundedRectangle(cr, voiceCloseRegion_.left(),
-                         voiceCloseRegion_.top(), voiceCloseRegion_.width(),
-                         voiceCloseRegion_.height(), 8);
-        cairo_fill(cr);
-        cairo_set_source_rgb(cr, AccentRed, AccentGreen, AccentBlue);
-        cairo_set_line_width(cr, 2.0);
-        cairo_move_to(cr, 390, 18);
-        cairo_line_to(cr, 402, 30);
-        cairo_move_to(cr, 402, 18);
-        cairo_line_to(cr, 390, 30);
-        cairo_stroke(cr);
-
-        cairoSetSourceColor(cr, theme.inputPanelText());
-        renderLayout(cr, upperLayout_.get(), 18, 12);
+        Rect iconRegion;
+        iconRegion.setPosition(7, 7).setSize(28, 28);
+        drawBubbleFishIcon(cr, theme, iconRegion, "bubblefish-voice");
         cairo_restore(cr);
         return;
     }
@@ -824,23 +866,9 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
         }
         int upperHeight = 0;
         pango_layout_get_pixel_size(upperLayout_.get(), nullptr, &upperHeight);
-        const int actionHeight = std::max(28, upperHeight + 6);
-        const int actionRight =
-            width - std::max(0.0, borderWidth) - *margin.marginRight -
-            *textMargin.marginRight;
-        voiceRegion_.setPosition(actionRight - 28, upperTop - 3);
-        voiceRegion_.setSize(28, actionHeight);
-        emojiRegion_.setPosition(voiceRegion_.left() - 32,
-                                 voiceRegion_.top());
-        emojiRegion_.setSize(28, actionHeight);
-        if (emojiEnabled_) {
-            drawBubbleFishIcon(cr, theme, emojiRegion_, "bubblefish-emoji");
-        }
-        drawBubbleFishIcon(cr, theme, voiceRegion_, "bubblefish-voice");
-    } else {
-        emojiRegion_ = Rect();
-        voiceRegion_ = Rect();
     }
+    emojiRegion_ = Rect();
+    voiceRegion_ = Rect();
 
     // Use yoga-based positioning for lower layout
     if (pango_layout_get_character_count(lowerLayout_.get())) {
@@ -915,11 +943,56 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
                          *clickMargin.marginTop - *clickMargin.marginBottom);
         candidateRegions_.push_back(candidateRegion);
 
+        const bool gridLayout = !gridColumnStarts_.empty();
+        if (!gridLayout && highlight) {
+            const int backgroundLeft =
+                candidateLayouts_[i].label.characterCount()
+                    ? static_cast<int>(labelLeft)
+                    : static_cast<int>(textLeft);
+            const int backgroundRight =
+                static_cast<int>(textLeft) + candidateLayouts_[i].text.width();
+            const int backgroundTop =
+                std::min(static_cast<int>(labelTop),
+                         static_cast<int>(textTop));
+            const int backgroundHeight =
+                std::max(candidateLayouts_[i].label.fontHeight(),
+                         candidateLayouts_[i].text.fontHeight());
+            if (backgroundRight > backgroundLeft && backgroundHeight > 0) {
+                cairoSetSourceColor(cr, Color("#087CF2"));
+                roundedRectangle(cr, backgroundLeft - 4, backgroundTop - 2,
+                                 backgroundRight - backgroundLeft + 8,
+                                 backgroundHeight + 4, 6);
+                cairo_fill(cr);
+            }
+        }
+
         if (candidateLayouts_[i].label.characterCount()) {
             candidateLayouts_[i].label.render(cr, labelLeft, labelTop,
                                               highlight);
         }
         if (candidateLayouts_[i].text.characterCount()) {
+            if (gridLayout && mouseHoverActive_ && hoverIndex_ == static_cast<int>(i) &&
+                hoverGridColumn_ >= 0 &&
+                hoverGridColumn_ < static_cast<int>(gridColumnStarts_.size())) {
+                const int columnLeft = gridColumnStarts_[hoverGridColumn_];
+                int columnRight = candidateLayouts_[i].text.width();
+                if (hoverGridColumn_ + 1 <
+                    static_cast<int>(gridColumnStarts_.size())) {
+                    columnRight =
+                        gridColumnStarts_[hoverGridColumn_ + 1] - CandidateGap;
+                }
+                if (columnRight > columnLeft) {
+                    cairoSetSourceColor(cr, Color("#087CF2"));
+                    roundedRectangle(
+                        cr, textLeft + columnLeft - 4, textTop - 2,
+                        columnRight - columnLeft + 8,
+                        candidateLayouts_[i].text.fontHeight() + 4, 6);
+                    cairo_fill(cr);
+                }
+            } else if (gridLayout && !mouseHoverActive_) {
+                candidateLayouts_[i].text.renderHighlightBackground(
+                    cr, textLeft, textTop, false);
+            }
             candidateLayouts_[i].text.render(cr, textLeft, textTop, highlight);
         }
         if (candidateLayouts_[i].comment.characterCount()) {
@@ -946,6 +1019,7 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
     clipboardRegion_ = Rect();
     translateRegion_ = Rect();
     fullShapeRegion_ = Rect();
+    emojiRegion_ = Rect();
     if (showToolBar_) {
         const int toolX = absolute<YGNodeLayoutGetLeft>(toolBarNode_) + 6;
         const int toolY = absolute<YGNodeLayoutGetTop>(toolBarNode_) + 3;
@@ -955,6 +1029,8 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
         translateRegion_.setSize(36, 34);
         fullShapeRegion_.setPosition(toolX + 88, toolY);
         fullShapeRegion_.setSize(36, 34);
+        emojiRegion_.setPosition(toolX + 132, toolY);
+        emojiRegion_.setSize(36, 34);
         drawBubbleFishIcon(cr, theme, clipboardRegion_,
                            "bubblefish-clipboard");
         drawBubbleFishIcon(cr, theme, translateRegion_,
@@ -967,6 +1043,9 @@ void InputWindow::paint(cairo_t *cr, unsigned int width, unsigned int height,
         drawBubbleFishIcon(cr, theme, fullShapeRegion_,
                            fullShape ? "bubblefish-full-to-half"
                                      : "bubblefish-half-to-full");
+        if (emojiEnabled_) {
+            drawBubbleFishIcon(cr, theme, emojiRegion_, "bubblefish-emoji");
+        }
     }
 
     emojiCategoryRegions_.clear();
@@ -1040,10 +1119,6 @@ void InputWindow::click(int x, int y) {
     if (!inputContext) {
         return;
     }
-    if (voicePanel_ && voiceCloseRegion_.contains(x, y)) {
-        startProcess({"/usr/bin/bubblefish-voice-service", "--close"});
-        return;
-    }
     if (emojiEnabled_ && emojiRegion_.contains(x, y)) {
         showEmojiPanel_ = !showEmojiPanel_;
         inputContext->updateUserInterface(UserInterfaceComponent::InputPanel);
@@ -1073,7 +1148,6 @@ void InputWindow::click(int x, int y) {
         return;
     }
     if (auto *grid = candidateList->toGrid()) {
-        constexpr int GridColumnWidth = 64;
         for (size_t row = 0; row < candidateRegions_.size() &&
                              row < candidateTextLefts_.size();
              ++row) {
@@ -1081,9 +1155,22 @@ void InputWindow::click(int x, int y) {
                 continue;
             }
             const int relativeX = x - candidateTextLefts_[row];
-            const int column = relativeX / GridColumnWidth;
-            if (relativeX >= 0 &&
-                column < grid->columnCount(static_cast<int>(row))) {
+            int column = -1;
+            if (relativeX >= 0) {
+                for (int candidateColumn = 0;
+                     candidateColumn <
+                     grid->columnCount(static_cast<int>(row));
+                     ++candidateColumn) {
+                    if (candidateColumn <
+                            static_cast<int>(gridColumnStarts_.size()) &&
+                        relativeX >= gridColumnStarts_[candidateColumn]) {
+                        column = candidateColumn;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if (column >= 0) {
                 grid->select(static_cast<int>(row), column, inputContext);
             }
             return;
@@ -1166,17 +1253,42 @@ void InputWindow::setFontDPI(int dpi) {
 }
 
 int InputWindow::highlight() const {
-    int highlightIndex = (hoverIndex_ >= 0) ? hoverIndex_ : candidateIndex_;
+    int highlightIndex = mouseHoverActive_ ? hoverIndex_ : candidateIndex_;
     return highlightIndex;
 }
 
 bool InputWindow::hover(int x, int y) {
+    if (x < 0 || y < 0) {
+        const bool changed =
+            mouseHoverActive_ || hoverIndex_ >= 0 || hoverGridColumn_ >= 0;
+        mouseHoverActive_ = false;
+        hoverIndex_ = -1;
+        hoverGridColumn_ = -1;
+        suppressInitialHover_ = false;
+        return changed;
+    }
+    if (suppressInitialHover_) {
+        if (initialHoverX_ < 0) {
+            initialHoverX_ = x;
+            initialHoverY_ = y;
+            return false;
+        }
+        if (x == initialHoverX_ && y == initialHoverY_) {
+            return false;
+        }
+        suppressInitialHover_ = false;
+    }
+
     bool needRepaint = false;
 
     bool prevHovered = false;
     bool nextHovered = false;
     auto oldHighlight = highlight();
+    const int oldGridColumn = hoverGridColumn_;
+    const bool oldMouseHoverActive = mouseHoverActive_;
+    mouseHoverActive_ = true;
     hoverIndex_ = -1;
+    hoverGridColumn_ = -1;
 
     prevHovered = prevRegion_.contains(x, y);
     if (!prevHovered) {
@@ -1185,6 +1297,34 @@ bool InputWindow::hover(int x, int y) {
             for (int idx = 0, e = candidateRegions_.size(); idx < e; idx++) {
                 if (candidateRegions_[idx].contains(x, y)) {
                     hoverIndex_ = idx;
+                    if (!gridColumnStarts_.empty() &&
+                        idx < static_cast<int>(candidateTextLefts_.size())) {
+                        const int relativeX = x - candidateTextLefts_[idx];
+                        for (int column = 0;
+                             column <
+                             static_cast<int>(gridColumnStarts_.size());
+                             ++column) {
+                            if (relativeX >= gridColumnStarts_[column]) {
+                                hoverGridColumn_ = column;
+                            } else {
+                                break;
+                            }
+                        }
+                        if (auto *inputContext = inputContext_.get()) {
+                            const auto candidateList =
+                                inputContext->inputPanel().candidateList();
+                            const auto *grid =
+                                candidateList ? candidateList->toGrid()
+                                              : nullptr;
+                            if (grid && hoverGridColumn_ >=
+                                            grid->columnCount(idx)) {
+                                hoverGridColumn_ = -1;
+                            }
+                        }
+                        if (hoverGridColumn_ < 0) {
+                            hoverIndex_ = -1;
+                        }
+                    }
                     break;
                 }
             }
@@ -1198,6 +1338,8 @@ bool InputWindow::hover(int x, int y) {
     nextHovered_ = nextHovered;
 
     needRepaint = needRepaint || oldHighlight != highlight();
+    needRepaint = needRepaint || oldGridColumn != hoverGridColumn_ ||
+                  oldMouseHoverActive != mouseHoverActive_;
     return needRepaint;
 }
 
@@ -1256,8 +1398,7 @@ void InputWindow::updateYogaLayout() {
         pango_layout_get_pixel_size(upperLayout_.get(), &w, &h);
         YGNodeStyleSetWidth(upperTextNode_.get(), w);
         YGNodeStyleSetHeight(upperTextNode_.get(), fontHeight);
-        // Reserve space for emoji and voice actions after the composition.
-        YGNodeStyleSetWidth(upperNode_.get(), w + 72);
+        YGNodeStyleSetWidth(upperNode_.get(), w);
     }
 
     // Configure and add lower node if it has content
@@ -1301,9 +1442,19 @@ void InputWindow::updateYogaLayout() {
                                     vertical ? YGFlexDirectionColumn
                                              : YGFlexDirectionRow);
 
+        // Reserve a common label column for every row. Only the active row may
+        // display number labels, but its appearance must not shift that row's
+        // candidate text relative to the other rows.
+        int commonLabelWidth = 0;
+        for (size_t i = 0; i < nCandidates_; ++i) {
+            if (candidateLayouts_[i].label.characterCount()) {
+                commonLabelWidth =
+                    std::max(commonLabelWidth, candidateLayouts_[i].label.width());
+            }
+        }
+
         // Configure individual candidate nodes
         for (size_t i = 0; i < nCandidates_; i++) {
-            int labelW = 0;
             int labelH = 0;
             int candidateW = 0;
             int candidateH = 0;
@@ -1318,9 +1469,6 @@ void InputWindow::updateYogaLayout() {
             int commentFontHeight = fontHeight;
             if (auto height = candidateLayouts_[i].comment.fontHeight()) {
                 commentFontHeight = height;
-            }
-            if (candidateLayouts_[i].label.characterCount()) {
-                labelW = candidateLayouts_[i].label.width();
             }
             labelH = labelFontHeight *
                      std::max(1, candidateLayouts_[i].label.size());
@@ -1341,7 +1489,7 @@ void InputWindow::updateYogaLayout() {
             YGNodeStyleSetAlignSelf(candidate.text.get(), YGAlignCenter);
             YGNodeStyleSetAlignSelf(candidate.label.get(), YGAlignCenter);
             YGNodeStyleSetAlignSelf(candidate.comment.get(), YGAlignCenter);
-            YGNodeStyleSetWidth(candidate.label.get(), labelW);
+            YGNodeStyleSetWidth(candidate.label.get(), commonLabelWidth);
             YGNodeStyleSetHeight(candidate.label.get(), labelH);
             YGNodeStyleSetWidth(candidate.text.get(), candidateW);
             YGNodeStyleSetHeight(candidate.text.get(), candidateH);
@@ -1351,7 +1499,7 @@ void InputWindow::updateYogaLayout() {
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeLeft,
                                  *textMargin.marginLeft);
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeRight,
-                                 *textMargin.marginRight + fontHeight);
+                                 *textMargin.marginRight + CandidateGap);
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeTop,
                                  *textMargin.marginTop);
             YGNodeStyleSetMargin(candidate.inner.get(), YGEdgeBottom,
@@ -1375,7 +1523,7 @@ void InputWindow::updateYogaLayout() {
                           showToolBar_ ? YGDisplayFlex : YGDisplayNone);
     if (showToolBar_) {
         YGNodeStyleSetHeight(toolBarNode_.get(), 40);
-        YGNodeStyleSetWidth(toolBarNode_.get(), 134);
+        YGNodeStyleSetWidth(toolBarNode_.get(), 178);
         YGNodeStyleSetMargin(toolBarNode_.get(), YGEdgeTop, 4);
     }
 

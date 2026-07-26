@@ -1984,8 +1984,10 @@ std::string Instance::addonForInputMethod(const std::string &imName) {
 }
 
 void Instance::configure() {
+    // BubbleFish owns the user-facing settings experience. The original
+    // Fcitx tool remains available from BubbleFish's Advanced page.
     startProcess(
-        {StandardPaths::fcitxPath("bindir", "fcitx5-configtool").string()});
+        {StandardPaths::fcitxPath("bindir", "bubblefish-settings").string()});
 }
 
 void Instance::configureAddon(const std::string & /*unused*/) {}
